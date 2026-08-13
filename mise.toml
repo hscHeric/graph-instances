@@ -1,0 +1,30 @@
+[tools]
+python = "latest"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+PROJECT_ROOT = "{{cwd}}"
+
+[tasks."download::harwell_boeing"]
+description = "Download the Harwell-Boeing matrix collection"
+run = "python scripts/download/dowload_harwell_boeing.py"
+
+[tasks."download::dimacs"]
+description = "Download the DIMACS graph collection"
+run = "python scripts/download/download_dimacs.py"
+
+[tasks."download::all"]
+description = "Download all graph datasets"
+depends = ["download::dimacs", "download::harwell_boeing"]
+
+[tasks."convert::harwell_boeing"]
+description = "Convert Harwell-Boeing matrices to DIMACS .col"
+run = "python scripts/convert/matrix_market.py datasets/harwell_boeing/raw"
+
+[tasks."convert::dimacs"]
+description = "Convert DIMACS Matrix Market files to DIMACS .col"
+run = "python scripts/convert/matrix_market.py datasets/dimacs/raw"
+
+[tasks."convert::all"]
+description = "Convert Matrix Market files from all datasets to DIMACS .col"
+run = "python scripts/convert/matrix_market.py"
