@@ -129,6 +129,9 @@ mise run convert::snap -- --analisar
 python scripts/convert/snap.py --analisar
 ```
 
+A task normal `convert::snap` também mostra essa classificação antes de
+iniciar a conversão completa.
+
 Para baixar ou converter todas as bases compatíveis:
 
 ```bash

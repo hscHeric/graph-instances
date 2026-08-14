@@ -254,13 +254,15 @@ def main() -> None:
     ignorados = len(arquivos) - len(selecionados)
     print(f"Encontrados: {len(selecionados)} grafos; {ignorados} arquivos auxiliares ignorados")
 
+    selecionados_paths = {path for path, _ in selecionados}
+    for path, formato in selecionados:
+        print(f"MANTER [{formato}]: {path}")
+    for path in arquivos:
+        if path not in selecionados_paths:
+            print(f"IGNORAR [auxiliar]: {path}")
+
     if args.analisar:
-        selecionados_paths = {path for path, _ in selecionados}
-        for path, formato in selecionados:
-            print(f"MANTER [{formato}]: {path}")
-        for path in arquivos:
-            if path not in selecionados_paths:
-                print(f"IGNORAR [auxiliar]: {path}")
+        print("Análise concluída; nenhum arquivo foi convertido.")
         return
 
     convertidos = sum(converter_arquivo(path, args.output, formato) for path, formato in selecionados)
