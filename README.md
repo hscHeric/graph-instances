@@ -156,7 +156,7 @@ de ambiente:
 | Harwell-Boeing | `HARWELL_BOEING_DOWNLOAD_WORKERS` | 15 | `HARWELL_BOEING_DOWNLOAD_WORKERS=8 mise run download::harwell_boeing` |
 | DIMACS | `DIMACS_DOWNLOAD_WORKERS` | 4 | `DIMACS_DOWNLOAD_WORKERS=8 mise run download::dimacs` |
 | BHOSLIB | `BHOSLIB_DOWNLOAD_WORKERS` | 36 | `BHOSLIB_DOWNLOAD_WORKERS=12 mise run download::bhoslib` |
-| SNAP | `SNAP_DOWNLOAD_WORKERS` | 15 | `SNAP_DOWNLOAD_WORKERS=20 mise run download::snap` |
+| SNAP | `SNAP_DOWNLOAD_WORKERS` | 99 (100 com Friendster) | `SNAP_DOWNLOAD_WORKERS=20 mise run download::snap` |
 
 Sem mise, a variável é usada da mesma forma:
 

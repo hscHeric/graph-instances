@@ -208,7 +208,7 @@ def main() -> None:
     urls = [*SNAP_URLS, FRIENDSTER_URL] if args.incluir_friendster else SNAP_URLS
 
     try:
-        workers = int(os.environ.get("SNAP_DOWNLOAD_WORKERS", "15"))
+        workers = int(os.environ.get("SNAP_DOWNLOAD_WORKERS", str(len(urls))))
     except ValueError as error:
         raise ValueError("SNAP_DOWNLOAD_WORKERS deve ser um número inteiro.") from error
     if workers < 1:
