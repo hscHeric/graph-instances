@@ -4,10 +4,36 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import move
 
 import ssgetpy
+
+
+def baixar_matriz(matrix, destination: Path) -> bool:
+    """Baixa e extrai uma matriz que ainda não existe no destino."""
+    if (destination / f"{matrix.name}.mtx").exists():
+        return False
+
+    matrix.download(format="MM", destpath=str(destination), extract=True)
+    return True
+
+
+def baixar_matrizes_em_paralelo(matrices, destination: Path, workers: int) -> None:
+    """Baixa e extrai matrizes usando múltiplas threads."""
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        downloads = {
+            executor.submit(baixar_matriz, matrix, destination): matrix
+            for matrix in matrices
+        }
+
+        total = len(downloads)
+        for concluido, future in enumerate(as_completed(downloads), start=1):
+            matrix = downloads[future]
+            baixada = future.result()
+            status = "OK" if baixada else "JÁ EXISTIA"
+            print(f"  [{concluido}/{total}] {status}: {matrix.name}")
 
 
 def mover_matrizes_para_raiz(destination: Path) -> int:
@@ -57,8 +83,22 @@ def main() -> None:
     if not matrices:
         raise RuntimeError("Nenhuma matriz da coleção Harwell-Boeing foi encontrada.")
 
-    print(f"Baixando {len(matrices)} matrizes para {destination}")
-    matrices.download(format="MM", destpath=str(destination), extract=True)
+    try:
+        workers = int(os.environ.get("HARWELL_BOEING_DOWNLOAD_WORKERS", "15"))
+    except ValueError as error:
+        raise ValueError(
+            "HARWELL_BOEING_DOWNLOAD_WORKERS deve ser um número inteiro."
+        ) from error
+    if workers < 1:
+        raise ValueError(
+            "HARWELL_BOEING_DOWNLOAD_WORKERS deve ser maior ou igual a 1."
+        )
+
+    print(
+        f"Baixando {len(matrices)} matrizes para {destination} "
+        f"com {workers} downloads simultâneos"
+    )
+    baixar_matrizes_em_paralelo(matrices, destination, workers)
 
     moved_files = mover_matrizes_para_raiz(destination)
     print(f"{moved_files} arquivos .mtx movidos para {destination}")
