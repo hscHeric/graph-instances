@@ -89,7 +89,7 @@ redes temporais. Os arquivos originais são listas de arestas `.txt` ou `.csv`.
 ```bash
 # Com mise
 mise run download::snap
-mise run converte::snap
+mise run convert::snap
 
 # Sem mise
 python scripts/download/download_snap.py
@@ -123,7 +123,7 @@ Para conferir o que será mantido ou ignorado sem converter:
 
 ```bash
 # Com mise
-mise run converte::snap -- --analisar
+mise run convert::snap -- --analisar
 
 # Sem mise
 python scripts/convert/snap.py --analisar
