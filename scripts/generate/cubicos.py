@@ -114,6 +114,7 @@ def obter_valores_n(args: argparse.Namespace) -> list[int]:
 
 
 def main() -> None:
+    args = parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
@@ -121,7 +122,6 @@ def main() -> None:
             "defina a variável de ambiente explicitamente."
         )
 
-    args = parse_args()
     if args.reps < 1:
         raise ValueError("reps deve ser maior ou igual a 1")
     valores_n = obter_valores_n(args)

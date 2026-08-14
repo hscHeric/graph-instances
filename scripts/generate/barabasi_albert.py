@@ -83,6 +83,7 @@ def validar_argumentos(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    args = parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
@@ -90,7 +91,6 @@ def main() -> None:
             "defina a variável de ambiente explicitamente."
         )
 
-    args = parse_args()
     validar_argumentos(args)
 
     pasta_saida = args.out or (
