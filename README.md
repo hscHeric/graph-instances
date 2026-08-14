@@ -89,15 +89,15 @@ redes temporais. Os arquivos originais são listas de arestas `.txt` ou `.csv`.
 ```bash
 # Com mise
 mise run download::snap
-mise run convert::snap
+mise run converte::snap
 
 # Sem mise
 python scripts/download/download_snap.py
 python scripts/convert/snap.py
 ```
 
-O conversor SNAP aceita listas de arestas `.txt`, `.csv`, `.tsv` e
-`.edgelist`, além dos formatos especiais `wiki-RfA`, MOOC e matrizes temporais
+O conversor SNAP aceita listas de arestas `.txt`, `.csv`, `.tsv`, `.edge`,
+`.edges` e `.edgelist`, além dos formatos especiais `wiki-RfA`, MOOC e matrizes temporais
 do `comm-f2f-Resistance`. A saída fica em `datasets/snap/processed/`.
 
 Como DIMACS `.col` representa grafos simples não direcionados, a conversão:
@@ -112,7 +112,7 @@ Para conferir o que será mantido ou ignorado sem converter:
 
 ```bash
 # Com mise
-mise run convert::snap -- --analisar
+mise run converte::snap -- --analisar
 
 # Sem mise
 python scripts/convert/snap.py --analisar

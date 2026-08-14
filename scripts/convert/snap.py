@@ -48,7 +48,7 @@ def classificar_arquivo(path: Path) -> str | None:
         return None
     if nome == "mooc_actions.tsv":
         return "mooc"
-    if path.suffix.lower() == ".edgelist":
+    if path.suffix.lower() in {".edge", ".edges", ".edgelist"}:
         return "espacos"
     if path.suffix.lower() == ".csv":
         if "edge" in nome or nome.startswith("soc-sign-bitcoin"):

@@ -39,7 +39,11 @@ run = "python scripts/convert/matrix_market.py datasets/bhoslib/raw"
 
 [tasks."convert::snap"]
 description = "Convert SNAP edge-list graphs to DIMACS .col"
-run = "python scripts/convert/snap.py"
+run = "python scripts/convert/snap.py --input datasets/snap/raw --output datasets/snap/processed"
+
+[tasks."converte::snap"]
+description = "Converte todos os grafos SNAP para DIMACS .col"
+run = "python scripts/convert/snap.py --input datasets/snap/raw --output datasets/snap/processed"
 
 [tasks."convert::all"]
 description = "Convert Matrix Market files from all datasets to DIMACS .col"
