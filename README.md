@@ -89,13 +89,34 @@ redes temporais. Os arquivos originais são listas de arestas `.txt` ou `.csv`.
 ```bash
 # Com mise
 mise run download::snap
+mise run convert::snap
 
 # Sem mise
 python scripts/download/download_snap.py
+python scripts/convert/snap.py
 ```
 
-O conversor Matrix Market não processa os arquivos SNAP, pois eles não usam o
-formato `.mtx`.
+O conversor SNAP aceita listas de arestas `.txt`, `.csv`, `.tsv` e
+`.edgelist`, além dos formatos especiais `wiki-RfA`, MOOC e matrizes temporais
+do `comm-f2f-Resistance`. A saída fica em `datasets/snap/processed/`.
+
+Como DIMACS `.col` representa grafos simples não direcionados, a conversão:
+
+- ignora direção, peso, sinal e timestamp;
+- remove laços e arestas duplicadas;
+- renumera os vértices para o intervalo `1..n`;
+- ignora atributos, labels, features, scripts, readmes e metadados;
+- preserva todos os arquivos originais em `raw/`.
+
+Para conferir o que será mantido ou ignorado sem converter:
+
+```bash
+# Com mise
+mise run convert::snap -- --analisar
+
+# Sem mise
+python scripts/convert/snap.py --analisar
+```
 
 Para baixar ou converter todas as bases compatíveis:
 
@@ -110,6 +131,7 @@ python scripts/download/download_dimacs.py
 python scripts/download/dowload_harwell_boeing.py
 python scripts/download/download_snap.py
 python scripts/convert/matrix_market.py
+python scripts/convert/snap.py
 ```
 
 ### Parâmetros dos downloads

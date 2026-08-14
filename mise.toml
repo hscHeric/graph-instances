@@ -37,9 +37,16 @@ run = "python scripts/convert/matrix_market.py datasets/dimacs/raw"
 description = "Convert BHOSLIB Matrix Market files to DIMACS .col"
 run = "python scripts/convert/matrix_market.py datasets/bhoslib/raw"
 
+[tasks."convert::snap"]
+description = "Convert SNAP edge-list graphs to DIMACS .col"
+run = "python scripts/convert/snap.py"
+
 [tasks."convert::all"]
 description = "Convert Matrix Market files from all datasets to DIMACS .col"
-run = "python scripts/convert/matrix_market.py"
+run = """
+python scripts/convert/matrix_market.py
+python scripts/convert/snap.py
+"""
 
 [tasks."generate::watts_strogatz"]
 description = "Generate Watts-Strogatz graphs in DIMACS .col format"
