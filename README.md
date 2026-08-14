@@ -178,9 +178,10 @@ python scripts/convert/matrix_market.py
 
 ## Grafos sintéticos
 
-Os geradores individuais exigem todos os parâmetros. Quando uma task
-individual é executada sem argumentos, ela apenas mostra a ajuda. A task
-`generate::all` é a única que possui uma configuração predefinida.
+As tasks do mise possuem configurações predefinidas e salvam os resultados em
+`datasets/<modelo>/processed/`. É possível substituir qualquer configuração
+passando o parâmetro depois de `--`. Ao executar os scripts diretamente, os
+parâmetros continuam obrigatórios.
 
 ### Erdős-Rényi
 
@@ -228,7 +229,7 @@ número de vértices deve ser par e maior que 3.
 
 ```bash
 # Com mise
-mise run generate::cubicos -- --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
+mise run generate::cubic -- --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
 python scripts/generate/cubicos.py --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
@@ -238,7 +239,7 @@ Também é possível usar uma progressão geométrica:
 
 ```bash
 # Com mise
-mise run generate::cubicos -- --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
+mise run generate::cubic -- --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
 python scripts/generate/cubicos.py --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
@@ -248,10 +249,10 @@ Para exibir a ajuda de qualquer gerador:
 
 ```bash
 # Com mise
-mise run generate::erdos_renyi
-mise run generate::barabasi_albert
-mise run generate::watts_strogatz
-mise run generate::cubicos
+mise run generate::erdos_renyi -- --help
+mise run generate::barabasi_albert -- --help
+mise run generate::watts_strogatz -- --help
+mise run generate::cubic -- --help
 
 # Sem mise
 python scripts/generate/erdos_renyi.py
@@ -282,19 +283,22 @@ Parâmetros específicos:
 | Watts-Strogatz | `--p-rewire P [P ...]` | Probabilidade de reconexão de cada aresta, entre 0 e 1. |
 | Cúbicos | `--doubling INÍCIO FATOR PASSOS` | Gera tamanhos em progressão geométrica. Deve ser usado no lugar de `--n`. |
 
-Todos esses parâmetros são obrigatórios nos geradores individuais. No caso
-dos cúbicos, deve-se informar exatamente um entre `--n` e `--doubling`.
+Todos esses parâmetros são obrigatórios ao executar os scripts diretamente.
+As tasks do mise já fornecem os valores predefinidos. No caso dos cúbicos,
+deve-se informar exatamente um entre `--n` e `--doubling` ao executar o script.
 
 ### Gerar todos com a configuração predefinida
-
-Somente esta task possui valores predefinidos:
 
 ```bash
 mise run generate::all
 ```
 
-Ela usa seed 42 e gera Erdős-Rényi, Barabási-Albert e Watts-Strogatz com
-`n = 100 250 500`, além de cúbicos com `n = 100 200 400 800 1600`. As saídas
+Ela usa seed 42. Para Erdős-Rényi, combina `n = 100 200 400 800 1600` com
+`p = 0.02 0.05 0.1 0.2 0.35` e gera duas repetições. Para os cúbicos, gera
+seis grafos para cada tamanho em `n = 100 200 400 800 1600`. Para
+Barabási-Albert, combina esses mesmos tamanhos com `m = 1 2 3 5 8` e gera
+duas repetições. Para Watts-Strogatz, combina os mesmos tamanhos com
+`k = 4 6 8 12` e `p-rewire = 0.01 0.1 0.3 0.5`, com uma repetição. As saídas
 ficam nas respectivas pastas `datasets/<modelo>/processed/`.
 
 ## Formato DIMACS `.col`

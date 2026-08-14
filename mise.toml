@@ -27,7 +27,12 @@ run = "python scripts/download/download_snap.py --incluir-friendster"
 
 [tasks."download::all"]
 description = "Download all graph datasets"
-depends = ["download::bhoslib", "download::dimacs", "download::harwell_boeing", "download::snap"]
+depends = [
+  "download::bhoslib",
+  "download::dimacs",
+  "download::harwell_boeing",
+  "download::snap",
+]
 
 [tasks."convert::harwell_boeing"]
 description = "Convert Harwell-Boeing matrices to DIMACS .col"
@@ -54,25 +59,25 @@ python scripts/convert/snap.py
 
 [tasks."generate::watts_strogatz"]
 description = "Generate Watts-Strogatz graphs in DIMACS .col format"
-run = "python scripts/generate/watts_strogatz.py"
+run = "python scripts/generate/watts_strogatz.py --n 100 200 400 800 1600 --k 4 6 8 12 --p-rewire 0.01 0.1 0.3 0.5 --reps 1 --seed 42 --out datasets/watts_strogatz/processed"
 
 [tasks."generate::barabasi_albert"]
 description = "Generate Barabasi-Albert graphs in DIMACS .col format"
-run = "python scripts/generate/barabasi_albert.py"
+run = "python scripts/generate/barabasi_albert.py --n 100 200 400 800 1600 --m 1 2 3 5 8 --reps 2 --seed 42 --out datasets/barabasi_albert/processed"
 
 [tasks."generate::erdos_renyi"]
 description = "Generate Erdos-Renyi graphs in DIMACS .col format"
-run = "python scripts/generate/erdos_renyi.py"
+run = "python scripts/generate/erdos_renyi.py --n 100 200 400 800 1600 --p 0.02 0.05 0.1 0.2 0.35 --reps 2 --seed 42 --out datasets/erdos_renyi/processed"
 
-[tasks."generate::cubicos"]
+[tasks."generate::cubic"]
 description = "Generate random cubic graphs in DIMACS .col format"
-run = "python scripts/generate/cubicos.py"
+run = "python scripts/generate/cubicos.py --doubling 100 2.0 5 --reps 6 --seed 42 --out datasets/cubicos/processed"
 
 [tasks."generate::all"]
 description = "Generate all synthetic graph datasets with standard parameters"
 run = """
-python scripts/generate/erdos_renyi.py --n 100 250 500 --p 0.05 0.1 0.2 --reps 3 --seed 42 --out datasets/erdos_renyi/processed
-python scripts/generate/barabasi_albert.py --n 100 250 500 --m 2 4 6 --reps 3 --seed 42 --out datasets/barabasi_albert/processed
-python scripts/generate/watts_strogatz.py --n 100 250 500 --k 4 6 8 --p-rewire 0.1 --reps 3 --seed 42 --out datasets/watts_strogatz/processed
-python scripts/generate/cubicos.py --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
+python scripts/generate/erdos_renyi.py --n 100 200 400 800 1600 --p 0.02 0.05 0.1 0.2 0.35 --reps 2 --seed 42 --out datasets/erdos_renyi/processed
+python scripts/generate/barabasi_albert.py --n 100 200 400 800 1600 --m 1 2 3 5 8 --reps 2 --seed 42 --out datasets/barabasi_albert/processed
+python scripts/generate/watts_strogatz.py --n 100 200 400 800 1600 --k 4 6 8 12 --p-rewire 0.01 0.1 0.3 0.5 --reps 1 --seed 42 --out datasets/watts_strogatz/processed
+python scripts/generate/cubicos.py --doubling 100 2.0 5 --reps 6 --seed 42 --out datasets/cubicos/processed
 """
