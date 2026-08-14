@@ -295,11 +295,15 @@ Quando `--n` é informado, ele substitui a progressão de `--doubling`.
 mise run generate::all
 ```
 
-Todos usam a progressão geométrica `200 1.15 30`, gerando 30 tamanhos de
-aproximadamente 200 a 11.500 vértices, uma repetição e seed 42. Erdős-Rényi
-usa grau médio alvo 10; Barabási-Albert usa `m=4`; Watts-Strogatz usa `k=6`
-e `p-rewire=0.1`; os grafos cúbicos são 3-regulares. As saídas ficam nas
-respectivas pastas `datasets/<modelo>/processed/`.
+| Script | Configuração predefinida | Resultado |
+| --- | --- | --- |
+| `cubicos.py` | `--doubling 200 1.15 30 --reps 1` | 30 grafos, de 200 a 11.516 vértices |
+| `erdos_renyi.py` | `--doubling 200 1.15 30 --avg-degree 10.0 --reps 1` | 30 grafos, com grau médio próximo de 10 |
+| `barabasi_albert.py` | `--doubling 200 1.15 30 --m 4 --reps 1` | 30 grafos, com grau médio próximo de 8 |
+| `watts_strogatz.py` | `--doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1` | 30 grafos |
+
+Todos usam seed 42 e salvam nas respectivas pastas
+`datasets/<modelo>/processed/`.
 
 ## Formato DIMACS `.col`
 
