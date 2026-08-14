@@ -81,3 +81,35 @@ python scripts/generate/barabasi_albert.py --doubling 200 1.15 30 --m 4 --reps 1
 python scripts/generate/watts_strogatz.py --doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1 --seed 42 --out datasets/watts_strogatz/processed
 python scripts/generate/cubicos.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubicos/processed
 """
+
+[tasks."select::harwell_boeing"]
+description = "Select representative Harwell-Boeing graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected"
+
+[tasks."select::dimacs"]
+description = "Select representative DIMACS graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected"
+
+[tasks."select::bhoslib"]
+description = "Select representative BHOSLIB graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected"
+
+[tasks."select::snap"]
+description = "Select representative SNAP graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected"
+
+[tasks."select::erdos_renyi"]
+description = "Select representative Erdos-Renyi graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected"
+
+[tasks."select::barabasi_albert"]
+description = "Select representative Barabasi-Albert graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected"
+
+[tasks."select::watts_strogatz"]
+description = "Select representative Watts-Strogatz graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected"
+
+[tasks."select::cubic"]
+description = "Select representative cubic graphs"
+run = "python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected"

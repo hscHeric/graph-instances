@@ -305,6 +305,51 @@ mise run generate::all
 Todos usam seed 42 e salvam nas respectivas pastas
 `datasets/<modelo>/processed/`.
 
+## Seleção representativa
+
+O seletor agrupa os grafos pelas características estruturais e escolhe o
+grafo mais próximo do centroide de cada cluster. A quantidade desejada é
+obrigatória e deve ser passada depois de `--`:
+
+```bash
+mise run select::harwell_boeing -- --n 30
+mise run select::dimacs -- --n 30
+mise run select::bhoslib -- --n 30
+mise run select::snap -- --n 30
+mise run select::erdos_renyi -- --n 30
+mise run select::barabasi_albert -- --n 30
+mise run select::watts_strogatz -- --n 30
+mise run select::cubic -- --n 30
+```
+
+Cada task lê `datasets/<base>/processed/` e substitui os arquivos `.col` de
+`datasets/<base>/selected/` pela nova seleção. Sem mise:
+
+```bash
+python scripts/select/representativos.py \
+  --input-dir datasets/snap/processed \
+  --n 30 \
+  --out datasets/snap/selected
+```
+
+Parâmetros adicionais:
+
+| Parâmetro | Significado |
+| --- | --- |
+| `--seed SEED` | Seed do k-means e da amostragem BFS; padrão 42. |
+| `--bfs-samples N` | Origens de BFS para aproximar diâmetro e caminho médio; padrão 10. |
+| `--csv ARQUIVO` | Salva as características, clusters e indicação dos selecionados. |
+
+O cálculo de clustering, transitividade e dominação gulosa pode consumir
+bastante memória e tempo em grafos com milhões de vértices. Reduzir
+`--bfs-samples` diminui somente o custo das estimativas por BFS.
+
+Dependências:
+
+```bash
+python -m pip install -r requirements.txt --break-system-packages
+```
+
 ## Formato DIMACS `.col`
 
 Cada arquivo contém comentários opcionais, uma linha com o número de vértices
