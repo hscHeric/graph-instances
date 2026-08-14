@@ -49,36 +49,37 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Gera grafos cúbicos aleatórios em formato DIMACS .col"
     )
-    parser.add_argument(
+    tamanhos = parser.add_mutually_exclusive_group(required=True)
+    tamanhos.add_argument(
         "--n",
         type=int,
         nargs="+",
         help="Lista explícita de números de vértices; sobrepõe --doubling",
     )
-    parser.add_argument(
+    tamanhos.add_argument(
         "--doubling",
         type=float,
         nargs=3,
-        default=[100.0, 2.0, 5.0],
         metavar=("INÍCIO", "FATOR", "PASSOS"),
-        help="Progressão geométrica (padrão: 100 2.0 5)",
+        help="Progressão geométrica",
     )
     parser.add_argument(
         "--reps",
         type=int,
-        default=5,
-        help="Repetições por tamanho (padrão: 5)",
+        required=True,
+        help="Repetições por tamanho",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Seed inicial para reprodutibilidade (padrão: 42)",
+        required=True,
+        help="Seed inicial para reprodutibilidade",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        help="Pasta de saída (padrão: datasets/cubicos/processed)",
+        required=True,
+        help="Pasta de saída",
     )
     if len(sys.argv) == 1:
         parser.print_help()
@@ -126,9 +127,7 @@ def main() -> None:
         raise ValueError("reps deve ser maior ou igual a 1")
     valores_n = obter_valores_n(args)
 
-    pasta_saida = args.out or (
-        Path(project_root) / "datasets" / "cubicos" / "processed"
-    )
+    pasta_saida = args.out
     pasta_saida.mkdir(parents=True, exist_ok=True)
 
     total = 0

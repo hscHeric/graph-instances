@@ -142,8 +142,9 @@ python scripts/convert/matrix_market.py
 
 ## Grafos sintéticos
 
-Os geradores exigem parâmetros. Quando uma task é executada sem argumentos,
-ela apenas mostra a ajuda do comando.
+Os geradores individuais exigem todos os parâmetros. Quando uma task
+individual é executada sem argumentos, ela apenas mostra a ajuda. A task
+`generate::all` é a única que possui uma configuração predefinida.
 
 ### Erdős-Rényi
 
@@ -152,10 +153,10 @@ simples para produzir grafos com densidades diferentes.
 
 ```bash
 # Com mise
-mise run generate::erdos_renyi -- --n 100 250 500 --p 0.05 0.1 --reps 3
+mise run generate::erdos_renyi -- --n 100 250 500 --p 0.05 0.1 --reps 3 --seed 42 --out datasets/erdos_renyi/processed
 
 # Sem mise
-python scripts/generate/erdos_renyi.py --n 100 250 500 --p 0.05 0.1 --reps 3
+python scripts/generate/erdos_renyi.py --n 100 250 500 --p 0.05 0.1 --reps 3 --seed 42 --out datasets/erdos_renyi/processed
 ```
 
 ### Barabási-Albert
@@ -165,10 +166,10 @@ a se conectar aos vértices que já possuem grau alto, formando hubs.
 
 ```bash
 # Com mise
-mise run generate::barabasi_albert -- --n 100 250 500 --m 2 4 --reps 3
+mise run generate::barabasi_albert -- --n 100 250 500 --m 2 4 --reps 3 --seed 42 --out datasets/barabasi_albert/processed
 
 # Sem mise
-python scripts/generate/barabasi_albert.py --n 100 250 500 --m 2 4 --reps 3
+python scripts/generate/barabasi_albert.py --n 100 250 500 --m 2 4 --reps 3 --seed 42 --out datasets/barabasi_albert/processed
 ```
 
 ### Watts-Strogatz
@@ -178,10 +179,10 @@ probabilidade `p-rewire`, combinando agrupamento local e caminhos curtos.
 
 ```bash
 # Com mise
-mise run generate::watts_strogatz -- --n 100 250 500 --k 4 8 --p-rewire 0.1 --reps 3
+mise run generate::watts_strogatz -- --n 100 250 500 --k 4 8 --p-rewire 0.1 --reps 3 --seed 42 --out datasets/watts_strogatz/processed
 
 # Sem mise
-python scripts/generate/watts_strogatz.py --n 100 250 500 --k 4 8 --p-rewire 0.1 --reps 3
+python scripts/generate/watts_strogatz.py --n 100 250 500 --k 4 8 --p-rewire 0.1 --reps 3 --seed 42 --out datasets/watts_strogatz/processed
 ```
 
 ### Grafos cúbicos
@@ -191,20 +192,20 @@ número de vértices deve ser par e maior que 3.
 
 ```bash
 # Com mise
-mise run generate::cubicos -- --n 100 200 400 --reps 5
+mise run generate::cubicos -- --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
-python scripts/generate/cubicos.py --n 100 200 400 --reps 5
+python scripts/generate/cubicos.py --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
 ```
 
 Também é possível usar uma progressão geométrica:
 
 ```bash
 # Com mise
-mise run generate::cubicos -- --doubling 100 2 5 --reps 5
+mise run generate::cubicos -- --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
-python scripts/generate/cubicos.py --doubling 100 2 5 --reps 5
+python scripts/generate/cubicos.py --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
 ```
 
 Para exibir a ajuda de qualquer gerador:
@@ -232,37 +233,33 @@ Parâmetros comuns a todos os geradores:
 | `--n N [N ...]` | Um ou mais números de vértices. |
 | `--reps REPETIÇÕES` | Quantidade de grafos gerados para cada combinação. |
 | `--seed SEED` | Seed inicial; é incrementada após cada grafo. |
-| `--out PASTA` | Substitui a pasta de saída padrão dentro de `datasets/`. |
+| `--out PASTA` | Pasta em que os arquivos `.col` serão salvos. |
 | `-h`, `--help` | Mostra a ajuda e não gera arquivos. |
 
 Parâmetros específicos:
 
-| Gerador | Parâmetro | Significado | Padrão interno |
-| --- | --- | --- | --- |
-| Erdős-Rényi | `--p P [P ...]` | Probabilidade de existir uma aresta entre cada par de vértices. | `0.05 0.1 0.2` |
-| Barabási-Albert | `--m M [M ...]` | Arestas criadas por cada novo vértice. Deve ser positivo e menor que `n`. | `2 4 6` |
-| Watts-Strogatz | `--k K [K ...]` | Vizinhos de cada vértice no anel inicial. Deve ser positivo e menor que `n`. | `4 6 8` |
-| Watts-Strogatz | `--p-rewire P [P ...]` | Probabilidade de reconexão de cada aresta, entre 0 e 1. | `0.1` |
-| Cúbicos | `--doubling INÍCIO FATOR PASSOS` | Gera tamanhos em progressão geométrica; é ignorado quando `--n` é usado. | `100 2 5` |
+| Gerador | Parâmetro | Significado |
+| --- | --- | --- |
+| Erdős-Rényi | `--p P [P ...]` | Probabilidade de existir uma aresta entre cada par de vértices. |
+| Barabási-Albert | `--m M [M ...]` | Arestas criadas por cada novo vértice. Deve ser positivo e menor que `n`. |
+| Watts-Strogatz | `--k K [K ...]` | Vizinhos de cada vértice no anel inicial. Deve ser positivo e menor que `n`. |
+| Watts-Strogatz | `--p-rewire P [P ...]` | Probabilidade de reconexão de cada aresta, entre 0 e 1. |
+| Cúbicos | `--doubling INÍCIO FATOR PASSOS` | Gera tamanhos em progressão geométrica. Deve ser usado no lugar de `--n`. |
 
-Valores padrão adicionais, usados quando outro argumento inicia a geração:
+Todos esses parâmetros são obrigatórios nos geradores individuais. No caso
+dos cúbicos, deve-se informar exatamente um entre `--n` e `--doubling`.
 
-| Gerador | `--n` | `--reps` | Saída padrão |
-| --- | --- | ---: | --- |
-| Erdős-Rényi | `100 250 500` | 3 | `datasets/erdos_renyi/processed/` |
-| Barabási-Albert | `100 250 500` | 3 | `datasets/barabasi_albert/processed/` |
-| Watts-Strogatz | `100 250 500` | 3 | `datasets/watts_strogatz/processed/` |
-| Cúbicos | progressão `100 200 400 800 1600` | 5 | `datasets/cubicos/processed/` |
+### Gerar todos com a configuração predefinida
 
-Exemplo usando apenas parte dos parâmetros e mantendo os demais padrões:
+Somente esta task possui valores predefinidos:
 
 ```bash
-# Com mise
-mise run generate::erdos_renyi -- --n 1000 --reps 10
-
-# Sem mise
-python scripts/generate/erdos_renyi.py --n 1000 --reps 10
+mise run generate::all
 ```
+
+Ela usa seed 42 e gera Erdős-Rényi, Barabási-Albert e Watts-Strogatz com
+`n = 100 250 500`, além de cúbicos com `n = 100 200 400 800 1600`. As saídas
+ficam nas respectivas pastas `datasets/<modelo>/processed/`.
 
 ## Formato DIMACS `.col`
 

@@ -34,39 +34,40 @@ def parse_args() -> argparse.Namespace:
         "--n",
         type=int,
         nargs="+",
-        default=[100, 250, 500],
-        help="Números de vértices (padrão: 100 250 500)",
+        required=True,
+        help="Números de vértices",
     )
     parser.add_argument(
         "--k",
         type=int,
         nargs="+",
-        default=[4, 6, 8],
-        help="Números de vizinhos no anel inicial (padrão: 4 6 8)",
+        required=True,
+        help="Números de vizinhos no anel inicial",
     )
     parser.add_argument(
         "--p-rewire",
         type=float,
         nargs="+",
-        default=[0.1],
-        help="Probabilidades de reconexão (padrão: 0.1)",
+        required=True,
+        help="Probabilidades de reconexão",
     )
     parser.add_argument(
         "--reps",
         type=int,
-        default=3,
-        help="Repetições por combinação (padrão: 3)",
+        required=True,
+        help="Repetições por combinação",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Seed inicial para reprodutibilidade (padrão: 42)",
+        required=True,
+        help="Seed inicial para reprodutibilidade",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        help="Pasta de saída (padrão: datasets/watts_strogatz/processed)",
+        required=True,
+        help="Pasta de saída",
     )
     if len(sys.argv) == 1:
         parser.print_help()
@@ -109,9 +110,7 @@ def main() -> None:
 
     validar_argumentos(args)
 
-    pasta_saida = args.out or (
-        Path(project_root) / "datasets" / "watts_strogatz" / "processed"
-    )
+    pasta_saida = args.out
     pasta_saida.mkdir(parents=True, exist_ok=True)
 
     total = 0

@@ -34,32 +34,33 @@ def parse_args() -> argparse.Namespace:
         "--n",
         type=int,
         nargs="+",
-        default=[100, 250, 500],
-        help="Números de vértices (padrão: 100 250 500)",
+        required=True,
+        help="Números de vértices",
     )
     parser.add_argument(
         "--m",
         type=int,
         nargs="+",
-        default=[2, 4, 6],
-        help="Números de arestas por novo vértice (padrão: 2 4 6)",
+        required=True,
+        help="Números de arestas por novo vértice",
     )
     parser.add_argument(
         "--reps",
         type=int,
-        default=3,
-        help="Repetições por combinação (padrão: 3)",
+        required=True,
+        help="Repetições por combinação",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Seed inicial para reprodutibilidade (padrão: 42)",
+        required=True,
+        help="Seed inicial para reprodutibilidade",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        help="Pasta de saída (padrão: datasets/barabasi_albert/processed)",
+        required=True,
+        help="Pasta de saída",
     )
     if len(sys.argv) == 1:
         parser.print_help()
@@ -93,9 +94,7 @@ def main() -> None:
 
     validar_argumentos(args)
 
-    pasta_saida = args.out or (
-        Path(project_root) / "datasets" / "barabasi_albert" / "processed"
-    )
+    pasta_saida = args.out
     pasta_saida.mkdir(parents=True, exist_ok=True)
 
     total = 0
