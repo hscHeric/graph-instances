@@ -13,9 +13,17 @@ run = "python scripts/download/dowload_harwell_boeing.py"
 description = "Download the DIMACS graph collection"
 run = "python scripts/download/download_dimacs.py"
 
+[tasks."download::bhoslib"]
+description = "Download the BHOSLIB graph collection"
+run = "python scripts/download/download_bhoslib.py"
+
+[tasks."download::snap"]
+description = "Download SNAP edge-list graph datasets"
+run = "python scripts/download/download_snap.py"
+
 [tasks."download::all"]
 description = "Download all graph datasets"
-depends = ["download::dimacs", "download::harwell_boeing"]
+depends = ["download::bhoslib", "download::dimacs", "download::harwell_boeing", "download::snap"]
 
 [tasks."convert::harwell_boeing"]
 description = "Convert Harwell-Boeing matrices to DIMACS .col"
@@ -25,6 +33,30 @@ run = "python scripts/convert/matrix_market.py datasets/harwell_boeing/raw"
 description = "Convert DIMACS Matrix Market files to DIMACS .col"
 run = "python scripts/convert/matrix_market.py datasets/dimacs/raw"
 
+[tasks."convert::bhoslib"]
+description = "Convert BHOSLIB Matrix Market files to DIMACS .col"
+run = "python scripts/convert/matrix_market.py datasets/bhoslib/raw"
+
 [tasks."convert::all"]
 description = "Convert Matrix Market files from all datasets to DIMACS .col"
 run = "python scripts/convert/matrix_market.py"
+
+[tasks."generate::watts_strogatz"]
+description = "Generate Watts-Strogatz graphs in DIMACS .col format"
+run = "python scripts/generate/watts_strogatz.py"
+
+[tasks."generate::barabasi_albert"]
+description = "Generate Barabasi-Albert graphs in DIMACS .col format"
+run = "python scripts/generate/barabasi_albert.py"
+
+[tasks."generate::erdos_renyi"]
+description = "Generate Erdos-Renyi graphs in DIMACS .col format"
+run = "python scripts/generate/erdos_renyi.py"
+
+[tasks."generate::cubicos"]
+description = "Generate random cubic graphs in DIMACS .col format"
+run = "python scripts/generate/cubicos.py"
+
+[tasks."generate::all"]
+description = "Generate all synthetic graph datasets"
+depends = ["generate::barabasi_albert", "generate::cubicos", "generate::erdos_renyi", "generate::watts_strogatz"]
