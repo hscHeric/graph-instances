@@ -9,7 +9,7 @@ import tarfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from shutil import copyfileobj
+from shutil import copyfileobj, move
 from urllib.parse import urlparse
 
 import requests
@@ -124,6 +124,63 @@ def extrair_arquivo(nome: str, origem: Path, destino: Path) -> int:
     return 1
 
 
+def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
+    """Move arquivos de subpastas para raw e descarta arquivos readme."""
+    movidos = 0
+    descartados = 0
+
+    for source in sorted(destination.rglob("*"), key=lambda path: str(path)):
+        if source.is_dir():
+            continue
+
+        relativo = source.relative_to(destination)
+        if relativo.parts[0] in {".downloads", ".concluidos"}:
+            continue
+
+        if source.name.lower().startswith("readme") or source.name.startswith("._"):
+            source.unlink()
+            descartados += 1
+            continue
+
+        if source.parent == destination:
+            continue
+
+        target = destination / source.name
+        if target.exists():
+            prefixo = "_".join(relativo.parent.parts)
+            target = destination / f"{prefixo}_{source.name}"
+
+        contador = 2
+        candidato = target
+        while candidato.exists():
+            candidato = target.with_name(
+                f"{target.stem}_{contador}{target.suffix}"
+            )
+            contador += 1
+
+        move(source, candidato)
+        movidos += 1
+
+    directories = sorted(
+        (
+            path
+            for path in destination.rglob("*")
+            if path.is_dir()
+            and path.relative_to(destination).parts[0]
+            not in {".downloads", ".concluidos"}
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for directory in directories:
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+    return movidos, descartados
+
+
 def main() -> None:
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
@@ -171,6 +228,12 @@ def main() -> None:
         except (OSError, gzip.BadGzipFile, tarfile.TarError, zipfile.BadZipFile) as error:
             print(f"  FALHOU ao extrair {nome}: {error}")
             falhas.append(nome)
+
+    movidos, descartados = mover_arquivos_para_raiz(destino)
+    print(
+        f"Organização concluída: {movidos} arquivos movidos para {destino} "
+        f"e {descartados} arquivos auxiliares descartados."
+    )
 
     if falhas:
         print(f"{len(falhas)} arquivos falharam: {', '.join(sorted(set(falhas)))}")
