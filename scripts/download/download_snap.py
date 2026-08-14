@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import os
 import tarfile
@@ -63,7 +64,6 @@ SNAP_URLS += [
     f"{BASE_URL}/bigdata/communities/{nome}"
     for nome in (
         "com-lj.ungraph.txt.gz",
-        "com-friendster.ungraph.txt.gz",
         "com-orkut.ungraph.txt.gz",
         "com-youtube.ungraph.txt.gz",
         "com-dblp.ungraph.txt.gz",
@@ -73,6 +73,19 @@ SNAP_URLS += [
 SNAP_URLS.append(
     f"{BASE_URL}/wikispeedia/wikispeedia_paths-and-graph.tar.gz"
 )
+FRIENDSTER_URL = f"{BASE_URL}/bigdata/communities/com-friendster.ungraph.txt.gz"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Baixa e extrai os grafos da coleção Stanford SNAP."
+    )
+    parser.add_argument(
+        "--incluir-friendster",
+        action="store_true",
+        help="Inclui o grafo com-Friendster, que é excepcionalmente grande.",
+    )
+    return parser.parse_args()
 
 
 def baixar_arquivo(url: str, destino: Path) -> tuple[str, Path | None]:
@@ -182,6 +195,7 @@ def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
 
 
 def main() -> None:
+    args = parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
@@ -191,6 +205,7 @@ def main() -> None:
 
     destino = Path(project_root) / "datasets" / "snap" / "raw"
     destino.mkdir(parents=True, exist_ok=True)
+    urls = [*SNAP_URLS, FRIENDSTER_URL] if args.incluir_friendster else SNAP_URLS
 
     try:
         workers = int(os.environ.get("SNAP_DOWNLOAD_WORKERS", "15"))
@@ -200,7 +215,7 @@ def main() -> None:
         raise ValueError("SNAP_DOWNLOAD_WORKERS deve ser maior ou igual a 1.")
 
     print(
-        f"Baixando {len(SNAP_URLS)} arquivos SNAP para {destino} "
+        f"Baixando {len(urls)} arquivos SNAP para {destino} "
         f"com {workers} downloads simultâneos"
     )
     falhas: list[str] = []
@@ -208,18 +223,18 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
             executor.submit(baixar_arquivo, url, destino): url
-            for url in SNAP_URLS
+            for url in urls
         }
         for concluido, future in enumerate(as_completed(downloads), start=1):
             url = downloads[future]
             nome = Path(urlparse(url).path).name
             try:
                 status, caminho = future.result()
-                print(f"  [{concluido}/{len(SNAP_URLS)}] {status}: {nome}")
+                print(f"  [{concluido}/{len(urls)}] {status}: {nome}")
                 if status == "OK" and caminho is not None:
                     baixados.append((nome, caminho))
             except (requests.RequestException, OSError) as error:
-                print(f"  [{concluido}/{len(SNAP_URLS)}] FALHOU: {nome}: {error}")
+                print(f"  [{concluido}/{len(urls)}] FALHOU: {nome}: {error}")
                 falhas.append(nome)
 
     for nome, caminho in baixados:

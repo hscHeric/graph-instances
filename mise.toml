@@ -18,8 +18,12 @@ description = "Download the BHOSLIB graph collection"
 run = "python scripts/download/download_bhoslib.py"
 
 [tasks."download::snap"]
-description = "Download SNAP edge-list graph datasets"
+description = "Download SNAP graph datasets without Friendster"
 run = "python scripts/download/download_snap.py"
+
+[tasks."download::snap::full"]
+description = "Download all SNAP graph datasets, including Friendster"
+run = "python scripts/download/download_snap.py --incluir-friendster"
 
 [tasks."download::all"]
 description = "Download all graph datasets"

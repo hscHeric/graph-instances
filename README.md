@@ -96,6 +96,17 @@ python scripts/download/download_snap.py
 python scripts/convert/snap.py
 ```
 
+O download comum não inclui o `com-Friendster`, pois essa instância é muito
+maior que as demais. Para baixar a coleção incluindo o Friendster:
+
+```bash
+# Com mise
+mise run download::snap::full
+
+# Sem mise
+python scripts/download/download_snap.py --incluir-friendster
+```
+
 O conversor SNAP aceita listas de arestas `.txt`, `.csv`, `.tsv`, `.edge`,
 `.edges` e `.edgelist`, além dos formatos especiais `wiki-RfA`, MOOC e matrizes temporais
 do `comm-f2f-Resistance`. A saída fica em `datasets/snap/processed/`.
