@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
 import networkx as nx
+
+
+def gerar_progressao_geometrica(inicio: int, fator: float, passos: int) -> list[int]:
+    """Gera uma progressão geométrica de tamanhos sem duplicatas."""
+    return list(dict.fromkeys(round(inicio * fator**passo) for passo in range(passos)))
 
 
 def salvar_dimacs(graph: nx.Graph, path: Path, comentario: str = "") -> None:
@@ -34,46 +37,57 @@ def parse_args() -> argparse.Namespace:
         "--n",
         type=int,
         nargs="+",
-        required=True,
-        help="Números de vértices",
+        default=None,
+        help="Números de vértices; sobrepõe --doubling",
+    )
+    parser.add_argument(
+        "--doubling", type=float, nargs=3, default=[200, 1.15, 30],
+        metavar=("INÍCIO", "FATOR", "PASSOS"),
+        help="Progressão geométrica (padrão: 200 1.15 30)",
     )
     parser.add_argument(
         "--m",
         type=int,
         nargs="+",
-        required=True,
-        help="Números de arestas por novo vértice",
+        default=[4],
+        help="Números de arestas por novo vértice (padrão: 4)",
     )
     parser.add_argument(
         "--reps",
         type=int,
-        required=True,
-        help="Repetições por combinação",
+        default=1,
+        help="Repetições por combinação (padrão: 1)",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        required=True,
-        help="Seed inicial para reprodutibilidade",
+        default=42,
+        help="Seed inicial para reprodutibilidade (padrão: 42)",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        required=True,
-        help="Pasta de saída",
+        default=Path("aleatorios_barabasi_albert"),
+        help="Pasta de saída (padrão: aleatorios_barabasi_albert)",
     )
-    if len(sys.argv) == 1:
-        parser.print_help()
-        parser.exit()
     return parser.parse_args()
 
 
-def validar_argumentos(args: argparse.Namespace) -> None:
+def obter_valores_n(args: argparse.Namespace) -> list[int]:
+    if args.n is not None:
+        return args.n
+    inicio, fator, passos = args.doubling
+    valores = gerar_progressao_geometrica(int(inicio), fator, int(passos))
+    print(f"Progressão geométrica gerada ({len(valores)} tamanhos): {valores}")
+    return valores
+
+
+def validar_argumentos(args: argparse.Namespace, valores_n: list[int]) -> None:
     """Valida os parâmetros antes de gerar qualquer arquivo."""
     if args.reps < 1:
         raise ValueError("reps deve ser maior ou igual a 1")
 
-    for n in args.n:
+    for n in valores_n:
         if n < 1:
             raise ValueError(f"n deve ser positivo (recebido n={n})")
         for m in args.m:
@@ -85,25 +99,19 @@ def validar_argumentos(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    project_root = os.environ.get("PROJECT_ROOT")
-    if not project_root:
-        raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
-        )
-
-    validar_argumentos(args)
+    valores_n = obter_valores_n(args)
+    validar_argumentos(args, valores_n)
 
     pasta_saida = args.out
     pasta_saida.mkdir(parents=True, exist_ok=True)
 
     total = 0
     seed = args.seed
-    for n in args.n:
+    for n in valores_n:
         for m in args.m:
             for repeticao in range(args.reps):
                 graph = nx.barabasi_albert_graph(n, m, seed=seed)
-                nome = f"ba_n{n}_m{m}_r{repeticao}.col"
+                nome = f"ba_n{n}_m{m}_{repeticao}.col"
                 caminho = pasta_saida / nome
                 salvar_dimacs(
                     graph,

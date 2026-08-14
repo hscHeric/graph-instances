@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 from pathlib import Path
 
 import networkx as nx
@@ -49,41 +47,39 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Gera grafos cúbicos aleatórios em formato DIMACS .col"
     )
-    tamanhos = parser.add_mutually_exclusive_group(required=True)
-    tamanhos.add_argument(
+    parser.add_argument(
         "--n",
         type=int,
         nargs="+",
+        default=None,
         help="Lista explícita de números de vértices; sobrepõe --doubling",
     )
-    tamanhos.add_argument(
+    parser.add_argument(
         "--doubling",
         type=float,
         nargs=3,
+        default=[200, 1.15, 30],
         metavar=("INÍCIO", "FATOR", "PASSOS"),
-        help="Progressão geométrica",
+        help="Progressão geométrica (padrão: 200 1.15 30)",
     )
     parser.add_argument(
         "--reps",
         type=int,
-        required=True,
-        help="Repetições por tamanho",
+        default=1,
+        help="Repetições por tamanho (padrão: 1)",
     )
     parser.add_argument(
         "--seed",
         type=int,
-        required=True,
-        help="Seed inicial para reprodutibilidade",
+        default=42,
+        help="Seed inicial para reprodutibilidade (padrão: 42)",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        required=True,
-        help="Pasta de saída",
+        default=Path("aleatorios_cubicos"),
+        help="Pasta de saída (padrão: aleatorios_cubicos)",
     )
-    if len(sys.argv) == 1:
-        parser.print_help()
-        parser.exit()
     return parser.parse_args()
 
 
@@ -116,13 +112,6 @@ def obter_valores_n(args: argparse.Namespace) -> list[int]:
 
 def main() -> None:
     args = parse_args()
-    project_root = os.environ.get("PROJECT_ROOT")
-    if not project_root:
-        raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
-        )
-
     if args.reps < 1:
         raise ValueError("reps deve ser maior ou igual a 1")
     valores_n = obter_valores_n(args)
@@ -138,7 +127,7 @@ def main() -> None:
             if any(grau != GRAU for _, grau in graph.degree()):
                 raise RuntimeError("o NetworkX gerou um grafo que não é 3-regular")
 
-            nome = f"cubico_n{n}_r{repeticao}.col"
+            nome = f"cubico_n{n}_{repeticao}.col"
             caminho = pasta_saida / nome
             salvar_dimacs(
                 graph,

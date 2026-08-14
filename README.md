@@ -180,13 +180,15 @@ python scripts/convert/matrix_market.py
 
 As tasks do mise possuem configurações predefinidas e salvam os resultados em
 `datasets/<modelo>/processed/`. É possível substituir qualquer configuração
-passando o parâmetro depois de `--`. Ao executar os scripts diretamente, os
-parâmetros continuam obrigatórios.
+passando o parâmetro depois de `--`. Os scripts também possuem valores padrão
+quando executados diretamente.
 
 ### Erdős-Rényi
 
-Cada par de vértices recebe uma aresta com probabilidade `p`. É um modelo
-simples para produzir grafos com densidades diferentes.
+Cada par de vértices recebe uma aresta com probabilidade `p`. Por padrão, o
+script recebe um grau médio alvo e calcula `p = grau/(n-1)`, mantendo grafos
+comparavelmente esparsos conforme o tamanho cresce. `--p` permite usar uma
+probabilidade fixa.
 
 ```bash
 # Com mise
@@ -255,10 +257,10 @@ mise run generate::watts_strogatz -- --help
 mise run generate::cubic -- --help
 
 # Sem mise
-python scripts/generate/erdos_renyi.py
-python scripts/generate/barabasi_albert.py
-python scripts/generate/watts_strogatz.py
-python scripts/generate/cubicos.py
+python scripts/generate/erdos_renyi.py --help
+python scripts/generate/barabasi_albert.py --help
+python scripts/generate/watts_strogatz.py --help
+python scripts/generate/cubicos.py --help
 ```
 
 ### Parâmetros dos geradores
@@ -268,6 +270,7 @@ Parâmetros comuns a todos os geradores:
 | Parâmetro | Significado |
 | --- | --- |
 | `--n N [N ...]` | Um ou mais números de vértices. |
+| `--doubling INÍCIO FATOR PASSOS` | Progressão geométrica usada quando `--n` não é informado. |
 | `--reps REPETIÇÕES` | Quantidade de grafos gerados para cada combinação. |
 | `--seed SEED` | Seed inicial; é incrementada após cada grafo. |
 | `--out PASTA` | Pasta em que os arquivos `.col` serão salvos. |
@@ -277,15 +280,14 @@ Parâmetros específicos:
 
 | Gerador | Parâmetro | Significado |
 | --- | --- | --- |
+| Erdős-Rényi | `--avg-degree G [G ...]` | Grau médio alvo; calcula `p = G/(n-1)`. |
 | Erdős-Rényi | `--p P [P ...]` | Probabilidade de existir uma aresta entre cada par de vértices. |
 | Barabási-Albert | `--m M [M ...]` | Arestas criadas por cada novo vértice. Deve ser positivo e menor que `n`. |
 | Watts-Strogatz | `--k K [K ...]` | Vizinhos de cada vértice no anel inicial. Deve ser positivo e menor que `n`. |
 | Watts-Strogatz | `--p-rewire P [P ...]` | Probabilidade de reconexão de cada aresta, entre 0 e 1. |
-| Cúbicos | `--doubling INÍCIO FATOR PASSOS` | Gera tamanhos em progressão geométrica. Deve ser usado no lugar de `--n`. |
+| Cúbicos | `--n N [N ...]` | Os valores devem ser pares e maiores que 3. |
 
-Todos esses parâmetros são obrigatórios ao executar os scripts diretamente.
-As tasks do mise já fornecem os valores predefinidos. No caso dos cúbicos,
-deve-se informar exatamente um entre `--n` e `--doubling` ao executar o script.
+Quando `--n` é informado, ele substitui a progressão de `--doubling`.
 
 ### Gerar todos com a configuração predefinida
 
@@ -293,13 +295,11 @@ deve-se informar exatamente um entre `--n` e `--doubling` ao executar o script.
 mise run generate::all
 ```
 
-Ela usa seed 42. Para Erdős-Rényi, combina `n = 100 200 400 800 1600` com
-`p = 0.02 0.05 0.1 0.2 0.35` e gera duas repetições. Para os cúbicos, gera
-seis grafos para cada tamanho em `n = 100 200 400 800 1600`. Para
-Barabási-Albert, combina esses mesmos tamanhos com `m = 1 2 3 5 8` e gera
-duas repetições. Para Watts-Strogatz, combina os mesmos tamanhos com
-`k = 4 6 8 12` e `p-rewire = 0.01 0.1 0.3 0.5`, com uma repetição. As saídas
-ficam nas respectivas pastas `datasets/<modelo>/processed/`.
+Todos usam a progressão geométrica `200 1.15 30`, gerando 30 tamanhos de
+aproximadamente 200 a 11.500 vértices, uma repetição e seed 42. Erdős-Rényi
+usa grau médio alvo 10; Barabási-Albert usa `m=4`; Watts-Strogatz usa `k=6`
+e `p-rewire=0.1`; os grafos cúbicos são 3-regulares. As saídas ficam nas
+respectivas pastas `datasets/<modelo>/processed/`.
 
 ## Formato DIMACS `.col`
 
