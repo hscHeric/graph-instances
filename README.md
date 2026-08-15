@@ -320,6 +320,8 @@ Durante o cálculo, as características de cada grafo são persistidas
 imediatamente em um banco SQLite temporário. O grafo é liberado da memória
 antes da leitura do próximo arquivo. Ao final, somente a pequena matriz de
 características é carregada para o k-means e o banco temporário é removido.
+Os cálculos usam precisão `float64`; no CSV e nas mensagens, características
+contínuas são apresentadas com seis casas decimais.
 
 ```bash
 mise run select::snap                 # 20

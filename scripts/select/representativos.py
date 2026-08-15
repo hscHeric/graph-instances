@@ -39,6 +39,21 @@ FEATURES = [
     "caminho_medio_aprox",
 ]
 
+FEATURES_INTEIRAS = {
+    "n_vertices",
+    "n_arestas",
+    "grau_minimo",
+    "grau_maximo",
+    "num_componentes",
+}
+
+
+def formatar_feature_para_csv(feature: str, valor: float) -> int | str:
+    """Preserva contagens como inteiros e floats com seis casas decimais."""
+    if feature in FEATURES_INTEIRAS:
+        return int(valor)
+    return f"{float(valor):.6f}"
+
 
 def ler_dimacs_col(caminho: Path) -> nx.Graph:
     """Lê um grafo simples no formato DIMACS .col."""
@@ -208,7 +223,9 @@ def salvar_csv(
                     "cluster": int(clusters[indice]),
                     "selecionado": indice in selecionados,
                     **{
-                        feature: matriz[indice, coluna]
+                        feature: formatar_feature_para_csv(
+                            feature, matriz[indice, coluna]
+                        )
                         for coluna, feature in enumerate(FEATURES)
                     },
                 }
@@ -250,7 +267,7 @@ def calcular_e_persistir_features(
             print(
                 f"[{indice + 1}/{len(arquivos)}] {caminho.name}: "
                 f"n={features['n_vertices']}, m={features['n_arestas']}, "
-                f"densidade={features['densidade']:.3f} [persistido]"
+                f"densidade={features['densidade']:.6f} [persistido]"
             )
             del features
             del grafo
@@ -356,8 +373,8 @@ def main() -> None:
         print(
             f"  {nome}: n={int(valores['n_vertices'])}, "
             f"m={int(valores['n_arestas'])}, "
-            f"densidade={valores['densidade']:.3f}, "
-            f"grau médio={valores['grau_medio']:.2f}"
+            f"densidade={valores['densidade']:.6f}, "
+            f"grau médio={valores['grau_medio']:.6f}"
         )
 
     if args.csv:
