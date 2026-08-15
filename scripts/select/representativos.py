@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import math
 import random
 import shutil
+import sqlite3
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -67,16 +70,28 @@ def diametro_e_caminho_aproximados(
 
     maior_componente = max(nx.connected_components(grafo), key=len)
     subgrafo = grafo.subgraph(maior_componente)
-    vertices = list(subgrafo)
-    amostras = random.Random(seed).sample(
-        vertices, min(numero_amostras, len(vertices))
-    )
+    rng = random.Random(seed)
+    amostras: list[int] = []
+    for indice, vertice in enumerate(subgrafo):
+        if indice < numero_amostras:
+            amostras.append(vertice)
+            continue
+        substituto = rng.randrange(indice + 1)
+        if substituto < numero_amostras:
+            amostras[substituto] = vertice
+
     excentricidades: list[int] = []
     caminhos_medios: list[float] = []
     for origem in amostras:
-        distancias = list(nx.single_source_shortest_path_length(subgrafo, origem).values())
-        excentricidades.append(max(distancias))
-        caminhos_medios.append(sum(distancias) / len(distancias))
+        maior_distancia = 0
+        soma_distancias = 0
+        quantidade = 0
+        for distancia in nx.single_source_shortest_path_length(subgrafo, origem).values():
+            maior_distancia = max(maior_distancia, distancia)
+            soma_distancias += distancia
+            quantidade += 1
+        excentricidades.append(maior_distancia)
+        caminhos_medios.append(soma_distancias / quantidade)
 
     return float(max(excentricidades)), float(np.mean(caminhos_medios))
 
@@ -104,7 +119,11 @@ def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, 
     except Exception:
         assortatividade = 0.0
 
-    componentes = list(nx.connected_components(grafo))
+    numero_componentes = 0
+    tamanho_maior_componente = 0
+    for componente in nx.connected_components(grafo):
+        numero_componentes += 1
+        tamanho_maior_componente = max(tamanho_maior_componente, len(componente))
     diametro, caminho_medio = diametro_e_caminho_aproximados(
         grafo, bfs_samples, seed
     )
@@ -121,10 +140,8 @@ def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, 
         "clustering_medio": nx.average_clustering(grafo),
         "transitividade": nx.transitivity(grafo),
         "assortatividade": float(assortatividade),
-        "num_componentes": len(componentes),
-        "frac_maior_componente": (
-            max(map(len, componentes)) / n if componentes and n else 0.0
-        ),
+        "num_componentes": numero_componentes,
+        "frac_maior_componente": tamanho_maior_componente / n if n else 0.0,
         "diametro_aprox": diametro,
         "caminho_medio_aprox": caminho_medio,
     }
@@ -173,7 +190,8 @@ def possui_vertices_e_arestas(caminho: Path) -> bool:
 
 def salvar_csv(
     caminho: Path,
-    linhas: list[dict],
+    nomes: list[str],
+    matriz: np.ndarray,
     clusters: np.ndarray,
     selecionados: list[int],
 ) -> None:
@@ -183,15 +201,79 @@ def salvar_csv(
             arquivo, fieldnames=["arquivo", "cluster", "selecionado", *FEATURES]
         )
         escritor.writeheader()
-        for indice, linha in enumerate(linhas):
+        for indice, nome in enumerate(nomes):
             escritor.writerow(
                 {
-                    "arquivo": linha["arquivo"],
+                    "arquivo": nome,
                     "cluster": int(clusters[indice]),
                     "selecionado": indice in selecionados,
-                    **{feature: linha[feature] for feature in FEATURES},
+                    **{
+                        feature: matriz[indice, coluna]
+                        for coluna, feature in enumerate(FEATURES)
+                    },
                 }
             )
+
+
+def calcular_e_persistir_features(
+    arquivos: list[Path], bfs_samples: int, seed: int
+) -> Path:
+    """Calcula um grafo por vez e persiste imediatamente as features em SQLite."""
+    with tempfile.NamedTemporaryFile(
+        prefix="selecao_grafos_", suffix=".sqlite3", delete=False
+    ) as temporario:
+        banco_path = Path(temporario.name)
+
+    colunas = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
+    placeholders = ", ".join("?" for _ in range(2 + len(FEATURES)))
+    conexao = sqlite3.connect(banco_path)
+    try:
+        conexao.execute("PRAGMA journal_mode=OFF")
+        conexao.execute("PRAGMA synchronous=OFF")
+        conexao.execute(
+            f"CREATE TABLE features (indice INTEGER PRIMARY KEY, arquivo TEXT, {colunas})"
+        )
+        print(f"Características temporárias serão persistidas em {banco_path}")
+
+        for indice, caminho in enumerate(arquivos):
+            grafo = ler_dimacs_col(caminho)
+            features = extrair_features(grafo, bfs_samples, seed)
+            conexao.execute(
+                f"INSERT INTO features VALUES ({placeholders})",
+                (
+                    indice,
+                    caminho.name,
+                    *(features[feature] for feature in FEATURES),
+                ),
+            )
+            conexao.commit()
+            print(
+                f"[{indice + 1}/{len(arquivos)}] {caminho.name}: "
+                f"n={features['n_vertices']}, m={features['n_arestas']}, "
+                f"densidade={features['densidade']:.3f} [persistido]"
+            )
+            del features
+            del grafo
+            gc.collect()
+    except BaseException:
+        conexao.close()
+        banco_path.unlink(missing_ok=True)
+        raise
+    else:
+        conexao.close()
+        return banco_path
+
+
+def carregar_features(banco_path: Path) -> tuple[list[str], np.ndarray]:
+    """Carrega do arquivo temporário somente os dados exigidos pelo k-means."""
+    colunas = ", ".join(f'"{feature}"' for feature in FEATURES)
+    with sqlite3.connect(banco_path) as conexao:
+        registros = conexao.execute(
+            f"SELECT arquivo, {colunas} FROM features ORDER BY indice"
+        ).fetchall()
+    nomes = [registro[0] for registro in registros]
+    matriz = np.asarray([registro[1:] for registro in registros], dtype=np.float64)
+    return nomes, matriz
 
 
 def main() -> None:
@@ -221,18 +303,15 @@ def main() -> None:
         args.n = len(arquivos)
 
     print(f"Calculando características de {len(arquivos)} grafos...")
-    linhas: list[dict] = []
-    for indice, caminho in enumerate(arquivos, start=1):
-        grafo = ler_dimacs_col(caminho)
-        features = extrair_features(grafo, args.bfs_samples, args.seed)
-        linhas.append({"arquivo": caminho.name, **features})
-        print(
-            f"[{indice}/{len(arquivos)}] {caminho.name}: "
-            f"n={features['n_vertices']}, m={features['n_arestas']}, "
-            f"densidade={features['densidade']:.3f}"
-        )
+    banco_path = calcular_e_persistir_features(
+        arquivos, args.bfs_samples, args.seed
+    )
+    try:
+        nomes, matriz = carregar_features(banco_path)
+    finally:
+        banco_path.unlink(missing_ok=True)
+    print("Arquivo temporário removido; iniciando o agrupamento.")
 
-    matriz = np.array([[linha[feature] for feature in FEATURES] for linha in linhas])
     matriz_padronizada = StandardScaler().fit_transform(matriz)
     kmeans = KMeans(n_clusters=args.n, random_state=args.seed, n_init=10)
     clusters = kmeans.fit_predict(matriz_padronizada)
@@ -248,7 +327,7 @@ def main() -> None:
 
     if len(selecionados) < args.n:
         restantes = [
-            indice for indice in range(len(linhas)) if indice not in selecionados
+            indice for indice in range(len(nomes)) if indice not in selecionados
         ]
         escolhidos = matriz_padronizada[selecionados]
         distancias = [
@@ -261,23 +340,28 @@ def main() -> None:
         )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    nomes_selecionados = {linhas[indice]["arquivo"] for indice in selecionados}
+    nomes_selecionados = {nomes[indice] for indice in selecionados}
     for existente in args.out.glob("*.col"):
         if existente.name not in nomes_selecionados:
             existente.unlink()
 
     print(f"Selecionados {len(selecionados)} grafos:")
     for indice in selecionados:
-        linha = linhas[indice]
-        shutil.copy2(args.input_dir / linha["arquivo"], args.out / linha["arquivo"])
+        nome = nomes[indice]
+        valores = {
+            feature: matriz[indice, coluna]
+            for coluna, feature in enumerate(FEATURES)
+        }
+        shutil.copy2(args.input_dir / nome, args.out / nome)
         print(
-            f"  {linha['arquivo']}: n={linha['n_vertices']}, "
-            f"m={linha['n_arestas']}, densidade={linha['densidade']:.3f}, "
-            f"grau médio={linha['grau_medio']:.2f}"
+            f"  {nome}: n={int(valores['n_vertices'])}, "
+            f"m={int(valores['n_arestas'])}, "
+            f"densidade={valores['densidade']:.3f}, "
+            f"grau médio={valores['grau_medio']:.2f}"
         )
 
     if args.csv:
-        salvar_csv(args.csv, linhas, clusters, selecionados)
+        salvar_csv(args.csv, nomes, matriz, clusters, selecionados)
         print(f"Características salvas em {args.csv}")
     print(f"Grafos copiados para {args.out}")
 

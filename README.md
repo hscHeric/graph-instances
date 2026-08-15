@@ -316,6 +316,11 @@ e entropia dos graus, clustering, transitividade, assortatividade,
 componentes conexas e estimativas de diâmetro e caminho médio. Nenhuma
 heurística específica de dominação participa da seleção.
 
+Durante o cálculo, as características de cada grafo são persistidas
+imediatamente em um banco SQLite temporário. O grafo é liberado da memória
+antes da leitura do próximo arquivo. Ao final, somente a pequena matriz de
+características é carregada para o k-means e o banco temporário é removido.
+
 ```bash
 mise run select::snap                 # 20
 mise run select::bhoslib              # 30
