@@ -308,19 +308,23 @@ Todos usam seed 42 e salvam nas respectivas pastas
 ## Seleção representativa
 
 O seletor agrupa os grafos pelas características estruturais e escolhe o
-grafo mais próximo do centroide de cada cluster. A quantidade desejada é
-obrigatória e deve ser passada depois de `--`:
+grafo mais próximo do centroide de cada cluster. Cada task possui uma
+quantidade predefinida:
 
 ```bash
-mise run select::harwell_boeing -- --n 30
-mise run select::dimacs -- --n 30
-mise run select::bhoslib -- --n 30
-mise run select::snap -- --n 30
-mise run select::erdos_renyi -- --n 30
-mise run select::barabasi_albert -- --n 30
-mise run select::watts_strogatz -- --n 30
-mise run select::cubic -- --n 30
+mise run select::snap                 # 20
+mise run select::bhoslib              # 30
+mise run select::harwell_boeing       # 50
+mise run select::dimacs               # 80
+mise run select::erdos_renyi          # 30
+mise run select::barabasi_albert      # 30
+mise run select::watts_strogatz       # 30
+mise run select::cubic                # 30
+mise run select::all
 ```
+
+Para substituir a quantidade predefinida, passe outro valor depois de `--`,
+por exemplo: `mise run select::snap -- --n 10`.
 
 Cada task lê `datasets/<base>/processed/` e substitui os arquivos `.col` de
 `datasets/<base>/selected/` pela nova seleção. Sem mise:
@@ -339,10 +343,17 @@ Parâmetros adicionais:
 | `--seed SEED` | Seed do k-means e da amostragem BFS; padrão 42. |
 | `--bfs-samples N` | Origens de BFS para aproximar diâmetro e caminho médio; padrão 10. |
 | `--csv ARQUIVO` | Salva as características, clusters e indicação dos selecionados. |
+| `--ignorar-sem-arestas` | Ignora grafos vazios ou formados somente por vértices isolados. |
+| `--usar-todos-se-faltar` | Usa todos os disponíveis quando a base possuir menos arquivos que `--n`. |
 
 O cálculo de clustering, transitividade e dominação gulosa pode consumir
 bastante memória e tempo em grafos com milhões de vértices. Reduzir
 `--bfs-samples` diminui somente o custo das estimativas por BFS.
+
+A seleção SNAP habilita automaticamente `--ignorar-sem-arestas`. Atualmente,
+a base DIMACS possui 78 arquivos processados; sua task avisará sobre a falta
+de duas instâncias e selecionará todos os 78. Quando existirem pelo menos 80,
+selecionará exatamente 80.
 
 Dependências:
 

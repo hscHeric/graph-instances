@@ -26,6 +26,7 @@ AUXILIARY_TERMS = (
     "page-name",
     "username",
     "network_list",
+    "shortest-path-distance-matrix",
     "path_finished",
     "path_unfinished",
 )
@@ -208,6 +209,15 @@ def converter_arquivo(path: Path, output: Path, formato: str) -> bool:
         vertices_declarados = numero_vertices_declarado(path)
         total_vertices = max(vertices_observados, vertices_declarados or 0)
         total_arestas = conexao.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+
+        if total_vertices == 0 or total_arestas == 0:
+            conexao.close()
+            destino.unlink(missing_ok=True)
+            print(
+                f"PULADO: {path.name}: grafo vazio ou somente com "
+                "vértices isolados"
+            )
+            return False
 
         with destino.open("w", encoding="utf-8", newline="\n") as arquivo:
             arquivo.write(f"c Convertido de {path.name}; direção, pesos e tempo ignorados\n")

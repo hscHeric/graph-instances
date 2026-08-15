@@ -179,7 +179,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bfs-samples", type=int, default=10)
     parser.add_argument("--csv", type=Path)
+    parser.add_argument(
+        "--ignorar-sem-arestas",
+        action="store_true",
+        help=(
+            "Ignora grafos com zero vértices, zero arestas ou somente "
+            "vértices isolados"
+        ),
+    )
+    parser.add_argument(
+        "--usar-todos-se-faltar",
+        action="store_true",
+        help="Seleciona todos os disponíveis quando a base tiver menos que --n",
+    )
     return parser.parse_args()
+
+
+def possui_vertices_e_arestas(caminho: Path) -> bool:
+    """Verifica pelo cabeçalho DIMACS se há vértices e alguma aresta."""
+    with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
+        for linha in arquivo:
+            if linha.startswith("p "):
+                partes = linha.split()
+                if len(partes) < 4:
+                    return False
+                return int(partes[2]) > 0 and int(partes[3]) > 0
+    return False
 
 
 def salvar_csv(
@@ -213,12 +238,23 @@ def main() -> None:
         raise ValueError("bfs-samples deve ser maior ou igual a 1")
 
     arquivos = sorted(args.input_dir.glob("*.col"))
+    if args.ignorar_sem_arestas:
+        invalidos = [caminho for caminho in arquivos if not possui_vertices_e_arestas(caminho)]
+        arquivos = [caminho for caminho in arquivos if caminho not in invalidos]
+        for caminho in invalidos:
+            print(f"IGNORADO [sem arestas]: {caminho}")
     if not arquivos:
         raise FileNotFoundError(f"nenhum arquivo .col encontrado em {args.input_dir}")
     if args.n > len(arquivos):
-        raise ValueError(
-            f"foram solicitados {args.n} grafos, mas a base possui {len(arquivos)}"
+        if not args.usar_todos_se_faltar:
+            raise ValueError(
+                f"foram solicitados {args.n} grafos, mas a base possui {len(arquivos)}"
+            )
+        print(
+            f"AVISO: foram solicitados {args.n} grafos, mas existem somente "
+            f"{len(arquivos)}; todos serão selecionados"
         )
+        args.n = len(arquivos)
 
     print(f"Calculando características de {len(arquivos)} grafos...")
     linhas: list[dict] = []

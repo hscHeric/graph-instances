@@ -84,32 +84,45 @@ python scripts/generate/cubicos.py --doubling 200 1.15 30 --reps 1 --seed 42 --o
 
 [tasks."select::harwell_boeing"]
 description = "Select representative Harwell-Boeing graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --n 50"
 
 [tasks."select::dimacs"]
 description = "Select representative DIMACS graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --n 80 --usar-todos-se-faltar"
 
 [tasks."select::bhoslib"]
 description = "Select representative BHOSLIB graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --n 30"
 
 [tasks."select::snap"]
 description = "Select representative SNAP graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected --n 20 --ignorar-sem-arestas"
 
 [tasks."select::erdos_renyi"]
 description = "Select representative Erdos-Renyi graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --n 30"
 
 [tasks."select::barabasi_albert"]
 description = "Select representative Barabasi-Albert graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --n 30"
 
 [tasks."select::watts_strogatz"]
 description = "Select representative Watts-Strogatz graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --n 30"
 
 [tasks."select::cubic"]
 description = "Select representative cubic graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected"
+run = "python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --n 30"
+
+[tasks."select::all"]
+description = "Select representative graphs from every dataset"
+run = """
+python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected --n 20 --ignorar-sem-arestas
+python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --n 30
+python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --n 50
+python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --n 80 --usar-todos-se-faltar
+python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --n 30
+python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --n 30
+python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --n 30
+python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --n 30
+"""
