@@ -311,6 +311,11 @@ O seletor agrupa os grafos pelas características estruturais e escolhe o
 grafo mais próximo do centroide de cada cluster. Cada task possui uma
 quantidade predefinida:
 
+São usadas 16 características topológicas: tamanho, densidade, estatísticas
+e entropia dos graus, clustering, transitividade, assortatividade,
+componentes conexas e estimativas de diâmetro e caminho médio. Nenhuma
+heurística específica de dominação participa da seleção.
+
 ```bash
 mise run select::snap                 # 20
 mise run select::bhoslib              # 30
@@ -346,9 +351,9 @@ Parâmetros adicionais:
 | `--ignorar-sem-arestas` | Ignora grafos vazios ou formados somente por vértices isolados. |
 | `--usar-todos-se-faltar` | Usa todos os disponíveis quando a base possuir menos arquivos que `--n`. |
 
-O cálculo de clustering, transitividade e dominação gulosa pode consumir
-bastante memória e tempo em grafos com milhões de vértices. Reduzir
-`--bfs-samples` diminui somente o custo das estimativas por BFS.
+O cálculo de clustering e transitividade pode consumir bastante memória e
+tempo em grafos com milhões de vértices. Reduzir `--bfs-samples` diminui
+somente o custo das estimativas por BFS.
 
 A seleção SNAP habilita automaticamente `--ignorar-sem-arestas`. Atualmente,
 a base DIMACS possui 78 arquivos processados; sua task avisará sobre a falta

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Seleciona N grafos DIMACS representativos para o problema de dominação."""
+"""Seleciona N grafos DIMACS representativos por características topológicas."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import heapq
 import math
 import random
 import shutil
@@ -35,8 +34,6 @@ FEATURES = [
     "frac_maior_componente",
     "diametro_aprox",
     "caminho_medio_aprox",
-    "dominacao_gulosa",
-    "razao_dominacao_gulosa",
 ]
 
 
@@ -59,35 +56,6 @@ def ler_dimacs_col(caminho: Path) -> nx.Graph:
                     f"linha DIMACS inválida em {caminho}:{numero_linha}: {texto}"
                 ) from erro
     return grafo
-
-
-def tamanho_dominante_guloso(grafo: nx.Graph) -> int:
-    """Calcula o tamanho de um conjunto dominante pela heurística gulosa."""
-    if grafo.number_of_nodes() == 0:
-        return 0
-
-    vizinhancas = {vertice: set(grafo[vertice]) | {vertice} for vertice in grafo}
-    nao_cobertos = set(grafo)
-    heap = [(-len(vizinhancas[vertice]), vertice) for vertice in grafo]
-    heapq.heapify(heap)
-    tamanho = 0
-
-    while nao_cobertos:
-        while heap:
-            ganho_negativo, vertice = heapq.heappop(heap)
-            ganho = len(vizinhancas[vertice] & nao_cobertos)
-            if ganho == -ganho_negativo:
-                break
-            if ganho:
-                heapq.heappush(heap, (-ganho, vertice))
-        else:
-            tamanho += len(nao_cobertos)
-            break
-
-        nao_cobertos -= vizinhancas[vertice]
-        tamanho += 1
-
-    return tamanho
 
 
 def diametro_e_caminho_aproximados(
@@ -122,7 +90,7 @@ def entropia_graus(graus: list[int]) -> float:
 
 
 def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, float]:
-    """Extrai características topológicas e relacionadas à dominação."""
+    """Extrai características estruturais topológicas do grafo."""
     n = grafo.number_of_nodes()
     m = grafo.number_of_edges()
     graus = [grau for _, grau in grafo.degree()]
@@ -140,8 +108,6 @@ def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, 
     diametro, caminho_medio = diametro_e_caminho_aproximados(
         grafo, bfs_samples, seed
     )
-    dominacao = tamanho_dominante_guloso(grafo)
-
     return {
         "n_vertices": n,
         "n_arestas": m,
@@ -161,8 +127,6 @@ def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, 
         ),
         "diametro_aprox": diametro,
         "caminho_medio_aprox": caminho_medio,
-        "dominacao_gulosa": dominacao,
-        "razao_dominacao_gulosa": dominacao / n if n else 0.0,
     }
 
 
@@ -170,7 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Seleciona grafos DIMACS representativos por clustering de "
-            "características relevantes para dominação"
+            "características estruturais topológicas"
         )
     )
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -264,9 +228,8 @@ def main() -> None:
         linhas.append({"arquivo": caminho.name, **features})
         print(
             f"[{indice}/{len(arquivos)}] {caminho.name}: "
-            f"n={features['n_vertices']}, "
-            f"dominação={features['dominacao_gulosa']}, "
-            f"razão={features['razao_dominacao_gulosa']:.3f}"
+            f"n={features['n_vertices']}, m={features['n_arestas']}, "
+            f"densidade={features['densidade']:.3f}"
         )
 
     matriz = np.array([[linha[feature] for feature in FEATURES] for linha in linhas])
@@ -309,8 +272,8 @@ def main() -> None:
         shutil.copy2(args.input_dir / linha["arquivo"], args.out / linha["arquivo"])
         print(
             f"  {linha['arquivo']}: n={linha['n_vertices']}, "
-            f"m={linha['n_arestas']}, razão_dominação="
-            f"{linha['razao_dominacao_gulosa']:.3f}"
+            f"m={linha['n_arestas']}, densidade={linha['densidade']:.3f}, "
+            f"grau médio={linha['grau_medio']:.2f}"
         )
 
     if args.csv:

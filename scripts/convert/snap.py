@@ -244,6 +244,55 @@ def converter_arquivo(path: Path, output: Path, formato: str) -> bool:
             banco_path.unlink(missing_ok=True)
 
 
+def verificar_e_remover_grafos_invalidos(output: Path) -> int:
+    """Remove .col sem vértices, sem arestas ou apenas com vértices isolados."""
+    removidos = 0
+    if not output.exists():
+        return removidos
+
+    print("Verificando os grafos convertidos...")
+    for caminho in sorted(output.glob("*.col")):
+        vertices: int | None = None
+        arestas_declaradas: int | None = None
+        encontrou_aresta = False
+
+        try:
+            with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
+                for linha in arquivo:
+                    if linha.startswith("p "):
+                        partes = linha.split()
+                        if len(partes) >= 4:
+                            vertices = int(partes[2])
+                            arestas_declaradas = int(partes[3])
+                    elif linha.startswith("e "):
+                        encontrou_aresta = True
+
+                    if (
+                        vertices is not None
+                        and arestas_declaradas is not None
+                        and encontrou_aresta
+                    ):
+                        break
+        except (OSError, ValueError):
+            vertices = None
+            arestas_declaradas = None
+
+        valido = (
+            vertices is not None
+            and vertices > 0
+            and arestas_declaradas is not None
+            and arestas_declaradas > 0
+            and encontrou_aresta
+        )
+        if not valido:
+            caminho.unlink(missing_ok=True)
+            removidos += 1
+            print(f"REMOVIDO [grafo inválido]: {caminho}")
+
+    print(f"Verificação concluída: {removidos} grafo(s) inválido(s) removido(s).")
+    return removidos
+
+
 def parse_args() -> argparse.Namespace:
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
@@ -275,7 +324,11 @@ def main() -> None:
         print("Análise concluída; nenhum arquivo foi convertido.")
         return
 
-    convertidos = sum(converter_arquivo(path, args.output, formato) for path, formato in selecionados)
+    convertidos = sum(
+        converter_arquivo(path, args.output, formato)
+        for path, formato in selecionados
+    )
+    verificar_e_remover_grafos_invalidos(args.output)
     print(f"Concluído: {convertidos} de {len(selecionados)} grafos convertidos")
 
 
