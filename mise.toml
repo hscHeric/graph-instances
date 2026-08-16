@@ -84,7 +84,7 @@ python scripts/generate/cubic.py --doubling 200 1.15 30 --reps 1 --seed 42 --out
 
 [tasks."select::harwell_boeing"]
 description = "Select representative Harwell-Boeing graphs"
-run = "python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50"
+run = "python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50 --usar-todos-se-faltar"
 
 [tasks."select::dimacs"]
 description = "Select representative DIMACS graphs"
@@ -92,7 +92,7 @@ run = "python scripts/select/representative_selection.py --input-dir datasets/di
 
 [tasks."select::bhoslib"]
 description = "Select representative BHOSLIB graphs"
-run = "python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30 --usar-todos-se-faltar"
 
 [tasks."select::snap"]
 description = "Select representative SNAP graphs"
@@ -117,8 +117,8 @@ run = "python scripts/select/representative_selection.py --input-dir datasets/cu
 [tasks."select::all"]
 description = "Select representative graphs from every dataset"
 run = """
-python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50
-python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30
+python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50 --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30 --usar-todos-se-faltar
 python scripts/select/representative_selection.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --db-name dimacs --n 80 --usar-todos-se-faltar
 python scripts/select/representative_selection.py --input-dir datasets/snap/processed --out datasets/snap/selected --db-name snap --n 20 --ignorar-sem-arestas --usar-todos-se-faltar
 python scripts/select/representative_selection.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --db-name erdos_renyi --n 30 --usar-todos-se-faltar

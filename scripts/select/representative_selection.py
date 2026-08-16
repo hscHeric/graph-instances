@@ -261,6 +261,24 @@ def possui_vertices_e_arestas(caminho: Path) -> bool:
     return False
 
 
+def quantidade_selecionada(output: Path) -> int:
+    """Conta somente os grafos DIMACS presentes na pasta selected."""
+    if not output.exists():
+        return 0
+    return sum(1 for _ in output.glob("*.col"))
+
+
+def selecao_ja_completa(output: Path, quantidade: int) -> bool:
+    atual = quantidade_selecionada(output)
+    if atual != quantidade:
+        return False
+    print(
+        f"Seleção já concluída: {atual} grafo(s) em {output}; "
+        "nenhum processamento necessário."
+    )
+    return True
+
+
 def salvar_csv(
     caminho: Path,
     nomes: list[str],
@@ -469,6 +487,8 @@ def main() -> None:
         raise ValueError("max-vertices deve ser maior ou igual a 0")
     if args.memory_limit_mb < 0:
         raise ValueError("memory-limit-mb deve ser maior ou igual a 0")
+    if selecao_ja_completa(args.out, args.n):
+        return
 
     banco_path = resolver_caminho_banco(args)
     if not args.only_select:
@@ -517,6 +537,9 @@ def main() -> None:
             "selecionando todos"
         )
         n_alvo = len(nomes)
+
+    if selecao_ja_completa(args.out, n_alvo):
+        return
 
     matriz_padronizada = StandardScaler().fit_transform(matriz)
     kmeans = KMeans(n_clusters=n_alvo, random_state=args.seed, n_init=10)

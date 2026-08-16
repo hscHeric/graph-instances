@@ -342,6 +342,9 @@ por exemplo: `mise run select::snap -- --n 10`.
 Cada task lê `datasets/<base>/processed/` e substitui os arquivos `.col` de
 `datasets/<base>/selected/` pela nova seleção. Sem mise:
 
+Se `selected/` já contiver a quantidade solicitada — ou a quantidade efetiva
+disponível após os fallbacks — a task encerra sem recalcular ou selecionar.
+
 ```bash
 python scripts/select/representative_selection.py \
   --input-dir datasets/snap/processed \
