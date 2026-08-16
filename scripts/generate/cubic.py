@@ -77,8 +77,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("aleatorios_cubicos"),
-        help="Pasta de saída (padrão: aleatorios_cubicos)",
+        default=Path("random_cubic_graphs"),
+        help="Pasta de saída (padrão: random_cubic_graphs)",
     )
     return parser.parse_args()
 
@@ -127,7 +127,7 @@ def main() -> None:
             if any(grau != GRAU for _, grau in graph.degree()):
                 raise RuntimeError("o NetworkX gerou um grafo que não é 3-regular")
 
-            nome = f"cubico_n{n}_{repeticao}.col"
+            nome = f"cubic_n{n}_{repeticao}.col"
             caminho = pasta_saida / nome
             salvar_dimacs(
                 graph,

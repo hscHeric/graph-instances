@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Seleciona N grafos DIMACS representativos por características topológicas."""
+"""Seleciona grafos representativos com isolamento de memória e retomada."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import gc
 import math
+import multiprocessing as mp
+import os
 import random
+import resource
 import shutil
 import sqlite3
-import tempfile
 import warnings
 from pathlib import Path
 
@@ -53,6 +54,18 @@ def formatar_feature_para_csv(feature: str, valor: float) -> int | str:
     if feature in FEATURES_INTEIRAS:
         return int(valor)
     return f"{float(valor):.6f}"
+
+
+def ler_cabecalho_dimacs(caminho: Path) -> tuple[int, int] | None:
+    """Lê somente `p edge n m`, sem carregar o grafo."""
+    with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
+        for linha in arquivo:
+            if linha.startswith("p "):
+                partes = linha.split()
+                if len(partes) < 4:
+                    return None
+                return int(partes[2]), int(partes[3])
+    return None
 
 
 def ler_dimacs_col(caminho: Path) -> nx.Graph:
@@ -166,7 +179,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Seleciona grafos DIMACS representativos por clustering de "
-            "características estruturais topológicas"
+            "características estruturais, com isolamento de memória e retomada"
         )
     )
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -175,6 +188,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bfs-samples", type=int, default=10)
     parser.add_argument("--csv", type=Path)
+    parser.add_argument("--db-name", help="Nome da base dentro de datasets/")
+    parser.add_argument("--db", type=Path, help="Caminho explícito do banco SQLite")
+    parser.add_argument(
+        "--max-vertices",
+        type=int,
+        default=500_000,
+        help="Pula grafos acima deste número de vértices; use 0 para desativar",
+    )
+    parser.add_argument(
+        "--memory-limit-mb",
+        "--limite-memoria-mb",
+        dest="memory_limit_mb",
+        type=int,
+        default=4096,
+        help="Limite de memória por subprocesso em MB; padrão: 4096",
+    )
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=300,
+        help="Tempo máximo por grafo; use 0 para desativar",
+    )
     parser.add_argument(
         "--ignorar-sem-arestas",
         action="store_true",
@@ -188,7 +223,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Seleciona todos os disponíveis quando a base tiver menos que --n",
     )
+    parser.add_argument(
+        "--only-select",
+        "--so-selecionar",
+        dest="only_select",
+        action="store_true",
+        help="Usa os dados já persistidos no banco sem calcular novos grafos",
+    )
     return parser.parse_args()
+
+
+def resolver_caminho_banco(args: argparse.Namespace) -> Path:
+    if args.db is not None:
+        args.db.parent.mkdir(parents=True, exist_ok=True)
+        return args.db
+
+    project_root = os.environ.get("PROJECT_ROOT")
+    if not project_root:
+        raise RuntimeError(
+            "PROJECT_ROOT não está definida; execute pelo mise ou passe --db"
+        )
+    nome_base = args.db_name or args.input_dir.parent.name
+    destino = Path(project_root) / "datasets" / nome_base
+    destino.mkdir(parents=True, exist_ok=True)
+    return destino / "features.sqlite3"
 
 
 def possui_vertices_e_arestas(caminho: Path) -> bool:
@@ -232,65 +290,173 @@ def salvar_csv(
             )
 
 
-def calcular_e_persistir_features(
-    arquivos: list[Path], bfs_samples: int, seed: int
-) -> Path:
-    """Calcula um grafo por vez e persiste imediatamente as features em SQLite."""
-    with tempfile.NamedTemporaryFile(
-        prefix="selecao_grafos_", suffix=".sqlite3", delete=False
-    ) as temporario:
-        banco_path = Path(temporario.name)
-
-    colunas = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
-    placeholders = ", ".join("?" for _ in range(2 + len(FEATURES)))
-    conexao = sqlite3.connect(banco_path)
+def _worker(
+    caminho: str,
+    bfs_samples: int,
+    seed: int,
+    limite_bytes: int,
+    transmissor,
+) -> None:
+    """Calcula um grafo em subprocesso limitado e devolve um resultado pequeno."""
     try:
-        conexao.execute("PRAGMA journal_mode=OFF")
-        conexao.execute("PRAGMA synchronous=OFF")
-        conexao.execute(
-            f"CREATE TABLE features (indice INTEGER PRIMARY KEY, arquivo TEXT, {colunas})"
-        )
-        print(f"Características temporárias serão persistidas em {banco_path}")
+        if limite_bytes > 0:
+            resource.setrlimit(resource.RLIMIT_AS, (limite_bytes, limite_bytes))
+    except (ValueError, OSError):
+        pass
 
-        for indice, caminho in enumerate(arquivos):
-            grafo = ler_dimacs_col(caminho)
-            features = extrair_features(grafo, bfs_samples, seed)
+    try:
+        grafo = ler_dimacs_col(Path(caminho))
+        transmissor.send((True, extrair_features(grafo, bfs_samples, seed)))
+    except MemoryError:
+        transmissor.send((False, "memória insuficiente"))
+    except Exception as erro:
+        transmissor.send((False, f"{type(erro).__name__}: {erro}"))
+    finally:
+        transmissor.close()
+
+
+def calcular_features_isolado(
+    caminho: Path,
+    bfs_samples: int,
+    seed: int,
+    limite_bytes: int,
+    timeout_s: float,
+) -> tuple[bool, dict | str]:
+    """Executa um worker descartável, sobrevivendo a timeout, crash ou OOM."""
+    contexto = mp.get_context("fork")
+    receptor, transmissor = contexto.Pipe(duplex=False)
+    processo = contexto.Process(
+        target=_worker,
+        args=(str(caminho), bfs_samples, seed, limite_bytes, transmissor),
+    )
+    processo.start()
+    transmissor.close()
+    processo.join(timeout_s if timeout_s > 0 else None)
+
+    if processo.is_alive():
+        processo.terminate()
+        processo.join(5)
+        if processo.is_alive():
+            processo.kill()
+            processo.join()
+        receptor.close()
+        return False, f"timeout após {timeout_s:.0f}s"
+
+    if receptor.poll(1):
+        resultado = receptor.recv()
+        receptor.close()
+        return resultado
+    receptor.close()
+    return (
+        False,
+        f"processo terminou sem resultado (exitcode={processo.exitcode}; provável OOM)",
+    )
+
+
+def preparar_banco(db_path: Path) -> sqlite3.Connection:
+    colunas = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
+    conexao = sqlite3.connect(db_path)
+    conexao.execute("PRAGMA journal_mode=WAL")
+    conexao.execute("PRAGMA synchronous=NORMAL")
+    conexao.execute(
+        f"CREATE TABLE IF NOT EXISTS features "
+        f"(arquivo TEXT PRIMARY KEY, {colunas})"
+    )
+    conexao.execute(
+        "CREATE TABLE IF NOT EXISTS failures "
+        "(arquivo TEXT PRIMARY KEY, motivo TEXT NOT NULL)"
+    )
+    conexao.commit()
+    return conexao
+
+
+def ordenar_por_tamanho(arquivos: list[Path]) -> list[Path]:
+    """Ordena pelo número declarado de vértices sem carregar os grafos."""
+    return sorted(
+        arquivos,
+        key=lambda caminho: (ler_cabecalho_dimacs(caminho) or (0, 0))[0],
+    )
+
+
+def calcular_e_persistir_features(
+    arquivos: list[Path],
+    bfs_samples: int,
+    seed: int,
+    db_path: Path,
+    max_vertices: int,
+    memory_limit_mb: int,
+    timeout_s: float,
+) -> None:
+    """Retoma o banco e processa somente arquivos ainda desconhecidos."""
+    conexao = preparar_banco(db_path)
+    processados = {
+        registro[0] for registro in conexao.execute("SELECT arquivo FROM features")
+    }
+    processados.update(
+        registro[0] for registro in conexao.execute("SELECT arquivo FROM failures")
+    )
+    pendentes = [
+        caminho for caminho in ordenar_por_tamanho(arquivos)
+        if caminho.name not in processados
+    ]
+    print(
+        f"Banco persistente: {db_path} | concluídos: {len(processados)} | "
+        f"pendentes: {len(pendentes)}"
+    )
+
+    placeholders = ", ".join("?" for _ in range(1 + len(FEATURES)))
+    limite_bytes = memory_limit_mb * 1024 * 1024
+    for indice, caminho in enumerate(pendentes, start=1):
+        cabecalho = ler_cabecalho_dimacs(caminho)
+        if max_vertices > 0 and cabecalho and cabecalho[0] > max_vertices:
+            motivo = f"n={cabecalho[0]} excede max-vertices={max_vertices}"
             conexao.execute(
-                f"INSERT INTO features VALUES ({placeholders})",
-                (
-                    indice,
-                    caminho.name,
-                    *(features[feature] for feature in FEATURES),
-                ),
+                "INSERT OR REPLACE INTO failures VALUES (?, ?)",
+                (caminho.name, motivo),
+            )
+            conexao.commit()
+            print(f"[{indice}/{len(pendentes)}] {caminho.name}: PULADO ({motivo})")
+            continue
+
+        sucesso, resultado = calcular_features_isolado(
+            caminho, bfs_samples, seed, limite_bytes, timeout_s
+        )
+        if sucesso:
+            conexao.execute(
+                f"INSERT OR REPLACE INTO features VALUES ({placeholders})",
+                (caminho.name, *(resultado[feature] for feature in FEATURES)),
             )
             conexao.commit()
             print(
-                f"[{indice + 1}/{len(arquivos)}] {caminho.name}: "
-                f"n={features['n_vertices']}, m={features['n_arestas']}, "
-                f"densidade={features['densidade']:.6f} [persistido]"
+                f"[{indice}/{len(pendentes)}] {caminho.name}: "
+                f"n={resultado['n_vertices']}, m={resultado['n_arestas']}, "
+                f"densidade={resultado['densidade']:.6f} [OK]"
             )
-            del features
-            del grafo
-            gc.collect()
-    except BaseException:
-        conexao.close()
-        banco_path.unlink(missing_ok=True)
-        raise
-    else:
-        conexao.close()
-        return banco_path
+        else:
+            conexao.execute(
+                "INSERT OR REPLACE INTO failures VALUES (?, ?)",
+                (caminho.name, str(resultado)),
+            )
+            conexao.commit()
+            print(f"[{indice}/{len(pendentes)}] {caminho.name}: FALHOU ({resultado})")
+    conexao.close()
 
 
-def carregar_features(banco_path: Path) -> tuple[list[str], np.ndarray]:
-    """Carrega do arquivo temporário somente os dados exigidos pelo k-means."""
+def carregar_features(
+    banco_path: Path,
+) -> tuple[list[str], np.ndarray, list[tuple[str, str]]]:
+    """Carrega somente os registros bem-sucedidos para o k-means."""
     colunas = ", ".join(f'"{feature}"' for feature in FEATURES)
     with sqlite3.connect(banco_path) as conexao:
         registros = conexao.execute(
-            f"SELECT arquivo, {colunas} FROM features ORDER BY indice"
+            f"SELECT arquivo, {colunas} FROM features ORDER BY arquivo"
+        ).fetchall()
+        falhas = conexao.execute(
+            "SELECT arquivo, motivo FROM failures ORDER BY arquivo"
         ).fetchall()
     nomes = [registro[0] for registro in registros]
     matriz = np.asarray([registro[1:] for registro in registros], dtype=np.float64)
-    return nomes, matriz
+    return nomes, matriz, falhas
 
 
 def main() -> None:
@@ -299,42 +465,65 @@ def main() -> None:
         raise ValueError("n deve ser maior ou igual a 1")
     if args.bfs_samples < 1:
         raise ValueError("bfs-samples deve ser maior ou igual a 1")
+    if args.max_vertices < 0:
+        raise ValueError("max-vertices deve ser maior ou igual a 0")
+    if args.memory_limit_mb < 0:
+        raise ValueError("memory-limit-mb deve ser maior ou igual a 0")
 
-    arquivos = sorted(args.input_dir.glob("*.col"))
-    if args.ignorar_sem_arestas:
-        invalidos = [caminho for caminho in arquivos if not possui_vertices_e_arestas(caminho)]
-        arquivos = [caminho for caminho in arquivos if caminho not in invalidos]
-        for caminho in invalidos:
-            print(f"IGNORADO [sem arestas]: {caminho}")
-    if not arquivos:
-        raise FileNotFoundError(f"nenhum arquivo .col encontrado em {args.input_dir}")
-    if args.n > len(arquivos):
+    banco_path = resolver_caminho_banco(args)
+    if not args.only_select:
+        arquivos = sorted(args.input_dir.glob("*.col"))
+        if args.ignorar_sem_arestas:
+            invalidos = [
+                caminho for caminho in arquivos
+                if not possui_vertices_e_arestas(caminho)
+            ]
+            arquivos = [caminho for caminho in arquivos if caminho not in invalidos]
+            for caminho in invalidos:
+                print(f"IGNORADO [sem arestas]: {caminho}")
+        if not arquivos:
+            raise FileNotFoundError(
+                f"nenhum arquivo .col encontrado em {args.input_dir}"
+            )
+        calcular_e_persistir_features(
+            arquivos,
+            args.bfs_samples,
+            args.seed,
+            banco_path,
+            args.max_vertices,
+            args.memory_limit_mb,
+            args.timeout_s,
+        )
+    elif not banco_path.exists():
+        raise FileNotFoundError(f"banco de características não encontrado: {banco_path}")
+
+    nomes, matriz, falhas = carregar_features(banco_path)
+    if falhas:
+        print(f"\n{len(falhas)} arquivo(s) pulado(s) ou com falha:")
+        for nome, motivo in falhas:
+            print(f"  {nome}: {motivo}")
+    if not nomes:
+        raise RuntimeError("nenhum grafo foi processado com sucesso")
+
+    n_alvo = args.n
+    if n_alvo > len(nomes):
         if not args.usar_todos_se_faltar:
             raise ValueError(
-                f"foram solicitados {args.n} grafos, mas a base possui {len(arquivos)}"
+                f"foram solicitados {n_alvo} grafos, mas somente "
+                f"{len(nomes)} foram processados com sucesso"
             )
         print(
-            f"AVISO: foram solicitados {args.n} grafos, mas existem somente "
-            f"{len(arquivos)}; todos serão selecionados"
+            f"AVISO: solicitados {n_alvo}, disponíveis {len(nomes)}; "
+            "selecionando todos"
         )
-        args.n = len(arquivos)
-
-    print(f"Calculando características de {len(arquivos)} grafos...")
-    banco_path = calcular_e_persistir_features(
-        arquivos, args.bfs_samples, args.seed
-    )
-    try:
-        nomes, matriz = carregar_features(banco_path)
-    finally:
-        banco_path.unlink(missing_ok=True)
-    print("Arquivo temporário removido; iniciando o agrupamento.")
+        n_alvo = len(nomes)
 
     matriz_padronizada = StandardScaler().fit_transform(matriz)
-    kmeans = KMeans(n_clusters=args.n, random_state=args.seed, n_init=10)
+    kmeans = KMeans(n_clusters=n_alvo, random_state=args.seed, n_init=10)
     clusters = kmeans.fit_predict(matriz_padronizada)
 
     selecionados: list[int] = []
-    for cluster in range(args.n):
+    for cluster in range(n_alvo):
         indices = np.where(clusters == cluster)[0]
         if not len(indices):
             continue
@@ -342,7 +531,7 @@ def main() -> None:
         distancias = np.linalg.norm(pontos - kmeans.cluster_centers_[cluster], axis=1)
         selecionados.append(int(indices[np.argmin(distancias)]))
 
-    if len(selecionados) < args.n:
+    if len(selecionados) < n_alvo:
         restantes = [
             indice for indice in range(len(nomes)) if indice not in selecionados
         ]
@@ -353,7 +542,7 @@ def main() -> None:
         ]
         ordem = np.argsort(distancias)[::-1]
         selecionados.extend(
-            restantes[indice] for indice in ordem[: args.n - len(selecionados)]
+            restantes[indice] for indice in ordem[: n_alvo - len(selecionados)]
         )
 
     args.out.mkdir(parents=True, exist_ok=True)

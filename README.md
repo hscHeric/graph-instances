@@ -46,7 +46,7 @@ mise run download::harwell_boeing
 mise run convert::harwell_boeing
 
 # Sem mise
-python scripts/download/dowload_harwell_boeing.py
+python scripts/download/download_harwell_boeing.py
 python scripts/convert/matrix_market.py datasets/harwell_boeing/raw
 ```
 
@@ -142,7 +142,7 @@ mise run convert::all
 # Sem mise: execute os downloaders desejados e depois o conversor geral
 python scripts/download/download_bhoslib.py
 python scripts/download/download_dimacs.py
-python scripts/download/dowload_harwell_boeing.py
+python scripts/download/download_harwell_boeing.py
 python scripts/download/download_snap.py
 python scripts/convert/matrix_market.py
 python scripts/convert/snap.py
@@ -234,7 +234,7 @@ número de vértices deve ser par e maior que 3.
 mise run generate::cubic -- --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
-python scripts/generate/cubicos.py --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
+python scripts/generate/cubic.py --n 100 200 400 --reps 5 --seed 42 --out datasets/cubicos/processed
 ```
 
 Também é possível usar uma progressão geométrica:
@@ -244,7 +244,7 @@ Também é possível usar uma progressão geométrica:
 mise run generate::cubic -- --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
 
 # Sem mise
-python scripts/generate/cubicos.py --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
+python scripts/generate/cubic.py --doubling 100 2 5 --reps 5 --seed 42 --out datasets/cubicos/processed
 ```
 
 Para exibir a ajuda de qualquer gerador:
@@ -260,7 +260,7 @@ mise run generate::cubic -- --help
 python scripts/generate/erdos_renyi.py --help
 python scripts/generate/barabasi_albert.py --help
 python scripts/generate/watts_strogatz.py --help
-python scripts/generate/cubicos.py --help
+python scripts/generate/cubic.py --help
 ```
 
 ### Parâmetros dos geradores
@@ -297,7 +297,7 @@ mise run generate::all
 
 | Script | Configuração predefinida | Resultado |
 | --- | --- | --- |
-| `cubicos.py` | `--doubling 200 1.15 30 --reps 1` | 30 grafos, de 200 a 11.516 vértices |
+| `cubic.py` | `--doubling 200 1.15 30 --reps 1` | 30 grafos, de 200 a 11.516 vértices |
 | `erdos_renyi.py` | `--doubling 200 1.15 30 --avg-degree 10.0 --reps 1` | 30 grafos, com grau médio próximo de 10 |
 | `barabasi_albert.py` | `--doubling 200 1.15 30 --m 4 --reps 1` | 30 grafos, com grau médio próximo de 8 |
 | `watts_strogatz.py` | `--doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1` | 30 grafos |
@@ -316,10 +316,11 @@ e entropia dos graus, clustering, transitividade, assortatividade,
 componentes conexas e estimativas de diâmetro e caminho médio. Nenhuma
 heurística específica de dominação participa da seleção.
 
-Durante o cálculo, as características de cada grafo são persistidas
-imediatamente em um banco SQLite temporário. O grafo é liberado da memória
-antes da leitura do próximo arquivo. Ao final, somente a pequena matriz de
-características é carregada para o k-means e o banco temporário é removido.
+Durante o cálculo, cada grafo roda em um subprocesso isolado com limite de
+memória e timeout. As características são persistidas imediatamente em
+`datasets/<base>/features.sqlite3`; uma nova execução retoma os arquivos
+pendentes. Crash, OOM ou timeout de um grafo não derrubam o processo principal.
+Ao final, somente a pequena matriz de características é carregada pelo k-means.
 Os cálculos usam precisão `float64`; no CSV e nas mensagens, características
 contínuas são apresentadas com seis casas decimais.
 
@@ -342,7 +343,7 @@ Cada task lê `datasets/<base>/processed/` e substitui os arquivos `.col` de
 `datasets/<base>/selected/` pela nova seleção. Sem mise:
 
 ```bash
-python scripts/select/representativos.py \
+python scripts/select/representative_selection.py \
   --input-dir datasets/snap/processed \
   --n 30 \
   --out datasets/snap/selected
@@ -355,6 +356,12 @@ Parâmetros adicionais:
 | `--seed SEED` | Seed do k-means e da amostragem BFS; padrão 42. |
 | `--bfs-samples N` | Origens de BFS para aproximar diâmetro e caminho médio; padrão 10. |
 | `--csv ARQUIVO` | Salva as características, clusters e indicação dos selecionados. |
+| `--db ARQUIVO` | Usa um caminho explícito para o banco persistente. |
+| `--db-name BASE` | Salva o banco em `datasets/BASE/features.sqlite3`. |
+| `--max-vertices N` | Pula grafos maiores que o limite; padrão 500.000, zero desativa. |
+| `--memory-limit-mb MB` | Memória máxima por subprocesso; padrão 4.096 MB. |
+| `--timeout-s SEGUNDOS` | Tempo máximo por grafo; padrão 300, zero desativa. |
+| `--only-select` | Não calcula features; seleciona usando somente o banco atual. |
 | `--ignorar-sem-arestas` | Ignora grafos vazios ou formados somente por vértices isolados. |
 | `--usar-todos-se-faltar` | Usa todos os disponíveis quando a base possuir menos arquivos que `--n`. |
 

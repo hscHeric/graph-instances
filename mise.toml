@@ -7,7 +7,7 @@ PROJECT_ROOT = "{{cwd}}"
 
 [tasks."download::harwell_boeing"]
 description = "Download the Harwell-Boeing matrix collection"
-run = "python scripts/download/dowload_harwell_boeing.py"
+run = "python scripts/download/download_harwell_boeing.py"
 
 [tasks."download::dimacs"]
 description = "Download the DIMACS graph collection"
@@ -71,7 +71,7 @@ run = "python scripts/generate/erdos_renyi.py --doubling 200 1.15 30 --avg-degre
 
 [tasks."generate::cubic"]
 description = "Generate random cubic graphs in DIMACS .col format"
-run = "python scripts/generate/cubicos.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubicos/processed"
+run = "python scripts/generate/cubic.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubicos/processed"
 
 [tasks."generate::all"]
 description = "Generate all synthetic graph datasets with standard parameters"
@@ -79,50 +79,50 @@ run = """
 python scripts/generate/erdos_renyi.py --doubling 200 1.15 30 --avg-degree 10 --reps 1 --seed 42 --out datasets/erdos_renyi/processed
 python scripts/generate/barabasi_albert.py --doubling 200 1.15 30 --m 4 --reps 1 --seed 42 --out datasets/barabasi_albert/processed
 python scripts/generate/watts_strogatz.py --doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1 --seed 42 --out datasets/watts_strogatz/processed
-python scripts/generate/cubicos.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubicos/processed
+python scripts/generate/cubic.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubicos/processed
 """
 
 [tasks."select::harwell_boeing"]
 description = "Select representative Harwell-Boeing graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --n 50"
+run = "python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50"
 
 [tasks."select::dimacs"]
 description = "Select representative DIMACS graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --n 80 --usar-todos-se-faltar"
+run = "python scripts/select/representative_selection.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --db-name dimacs --n 80 --usar-todos-se-faltar"
 
 [tasks."select::bhoslib"]
 description = "Select representative BHOSLIB graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30"
 
 [tasks."select::snap"]
 description = "Select representative SNAP graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected --n 20 --ignorar-sem-arestas"
+run = "python scripts/select/representative_selection.py --input-dir datasets/snap/processed --out datasets/snap/selected --db-name snap --n 20 --ignorar-sem-arestas --usar-todos-se-faltar"
 
 [tasks."select::erdos_renyi"]
 description = "Select representative Erdos-Renyi graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --db-name erdos_renyi --n 30 --usar-todos-se-faltar"
 
 [tasks."select::barabasi_albert"]
 description = "Select representative Barabasi-Albert graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --db-name barabasi_albert --n 30 --usar-todos-se-faltar"
 
 [tasks."select::watts_strogatz"]
 description = "Select representative Watts-Strogatz graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --db-name watts_strogatz --n 30 --usar-todos-se-faltar"
 
 [tasks."select::cubic"]
 description = "Select representative cubic graphs"
-run = "python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --n 30"
+run = "python scripts/select/representative_selection.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --db-name cubicos --n 30 --usar-todos-se-faltar"
 
 [tasks."select::all"]
 description = "Select representative graphs from every dataset"
 run = """
-python scripts/select/representativos.py --input-dir datasets/snap/processed --out datasets/snap/selected --n 20 --ignorar-sem-arestas
-python scripts/select/representativos.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --n 30
-python scripts/select/representativos.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --n 50
-python scripts/select/representativos.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --n 80 --usar-todos-se-faltar
-python scripts/select/representativos.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --n 30
-python scripts/select/representativos.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --n 30
-python scripts/select/representativos.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --n 30
-python scripts/select/representativos.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --n 30
+python scripts/select/representative_selection.py --input-dir datasets/harwell_boeing/processed --out datasets/harwell_boeing/selected --db-name harwell_boeing --n 50
+python scripts/select/representative_selection.py --input-dir datasets/bhoslib/processed --out datasets/bhoslib/selected --db-name bhoslib --n 30
+python scripts/select/representative_selection.py --input-dir datasets/dimacs/processed --out datasets/dimacs/selected --db-name dimacs --n 80 --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/snap/processed --out datasets/snap/selected --db-name snap --n 20 --ignorar-sem-arestas --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/erdos_renyi/processed --out datasets/erdos_renyi/selected --db-name erdos_renyi --n 30 --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/barabasi_albert/processed --out datasets/barabasi_albert/selected --db-name barabasi_albert --n 30 --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/watts_strogatz/processed --out datasets/watts_strogatz/selected --db-name watts_strogatz --n 30 --usar-todos-se-faltar
+python scripts/select/representative_selection.py --input-dir datasets/cubicos/processed --out datasets/cubicos/selected --db-name cubicos --n 30 --usar-todos-se-faltar
 """
