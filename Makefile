@@ -28,8 +28,8 @@ CFLAGS  := -std=c11 -O3 -march=native -mtune=native -flto \
 
 all: graph.o
 
-graph.o: graph.c graph.h
-	$(CC) $(CFLAGS) -c graph.c -o graph.o
+graph.o: src/graph/graph.c src/graph/graph.h
+	$(CC) $(CFLAGS) -c src/graph/graph.c -o graph.o
 
 clean:
 	rm -f *.o *.bin

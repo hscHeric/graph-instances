@@ -11,7 +11,7 @@
  *   - formato binario + mmap: leitura de execucoes repetidas sem parsing
  *
  * Compilar com otimizacoes (ver Makefile):
- *   gcc -O3 -march=native -flto -funroll-loops -c graph.c
+ *   gcc -O3 -march=native -flto -funroll-loops -c src/graph/graph.c
  */
 #define _GNU_SOURCE /* MAP_POPULATE */
 
