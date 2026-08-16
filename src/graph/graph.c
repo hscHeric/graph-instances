@@ -43,13 +43,13 @@
 #define BIN_MAGIC 0x47524231u /* "GRB1" */
 #define BIN_VERSION 1u
 
-typedef struct {
+struct bin_header {
   uint32_t magic;
   uint32_t version;
   uint32_t n;
   uint32_t reserved; /* alinhamento; mantem o header em 8 bytes redondos */
   uint64_t m;
-} BinHeader;
+};
 
 static inline const char *skip_to_digit(const char *p, const char *end) {
   while (p < end && (*p < '0' || *p > '9') && *p != '\n') {
@@ -81,9 +81,9 @@ static inline uint32_t read_uint(const char **p, const char *end) {
 
 /*construcao do CSR a partir de uma lista de arestas*/
 
-typedef struct {
+struct edge {
   uint32_t u, v;
-} Edge;
+};
 
 static int compare_uint32(const void *a, const void *b) {
   uint32_t x = *(const uint32_t *)a;
@@ -94,7 +94,8 @@ static int compare_uint32(const void *a, const void *b) {
 /* Constroi offset/adjacency a partir de um array de arestas ja carregado em
  * memoria (0-indexado). Aloca os arrays finais e ordena cada lista de
  * vizinhos. Retorna 0 em sucesso, -1 em falha de alocacao. */
-static int build_csr(Graph *g, const Edge *edges, uint64_t m, uint32_t n) {
+static int build_csr(graph *g, const struct edge *edges, uint64_t m,
+                     uint32_t n) {
   g->n = n;
   g->m = m;
 
@@ -155,7 +156,7 @@ static int build_csr(Graph *g, const Edge *edges, uint64_t m, uint32_t n) {
 
 /*carregamento a partir de DIMACS .col*/
 
-HOT Graph *graph_load_dimacs(const char *path) {
+HOT graph *graph_load_dimacs(const char *path) {
   int fd = open(path, O_RDONLY);
   if (UNLIKELY(fd < 0)) {
     fprintf(stderr, "graph_load_dimacs: nao foi possivel abrir '%s': %s\n",
@@ -193,7 +194,7 @@ HOT Graph *graph_load_dimacs(const char *path) {
    * declare menos do que realmente tem. */
   uint64_t capacity = 1024;
   uint64_t total_edges = 0;
-  Edge *edges = (Edge *)malloc(capacity * sizeof(Edge));
+  struct edge *edges = malloc(capacity * sizeof(*edges));
   if (UNLIKELY(!edges)) {
     munmap(map, file_size);
     fprintf(stderr, "graph_load_dimacs: falha de alocacao\n");
@@ -222,7 +223,7 @@ HOT Graph *graph_load_dimacs(const char *path) {
       header_found = 1;
       if (m_declared > 0) {
         capacity = m_declared;
-        Edge *grown = (Edge *)realloc(edges, capacity * sizeof(Edge));
+        struct edge *grown = realloc(edges, capacity * sizeof(*edges));
         if (UNLIKELY(!grown)) {
           free(edges);
           munmap(map, file_size);
@@ -250,7 +251,7 @@ HOT Graph *graph_load_dimacs(const char *path) {
 
       if (UNLIKELY(total_edges >= capacity)) {
         capacity = capacity * 2 + 16;
-        Edge *grown = (Edge *)realloc(edges, capacity * sizeof(Edge));
+        struct edge *grown = realloc(edges, capacity * sizeof(*edges));
         if (UNLIKELY(!grown)) {
           free(edges);
           munmap(map, file_size);
@@ -293,7 +294,7 @@ HOT Graph *graph_load_dimacs(const char *path) {
     n = max_index;
   }
 
-  Graph *g = (Graph *)calloc(1, sizeof(Graph));
+  graph *g = calloc(1, sizeof(*g));
   if (UNLIKELY(!g)) {
     free(edges);
     fprintf(stderr, "graph_load_dimacs: falha de alocacao\n");
@@ -313,7 +314,7 @@ HOT Graph *graph_load_dimacs(const char *path) {
 
 /* ---------- formato binario proprio (salvar) ---------- */
 
-int graph_save_binary(const Graph *g, const char *path) {
+int graph_save_binary(const graph *g, const char *path) {
   FILE *f = fopen(path, "wb");
   if (UNLIKELY(!f)) {
     fprintf(stderr, "graph_save_binary: nao foi possivel criar '%s': %s\n",
@@ -321,7 +322,7 @@ int graph_save_binary(const Graph *g, const char *path) {
     return -1;
   }
 
-  BinHeader header;
+  struct bin_header header;
   header.magic = BIN_MAGIC;
   header.version = BIN_VERSION;
   header.n = g->n;
@@ -346,7 +347,7 @@ int graph_save_binary(const Graph *g, const char *path) {
 
 /* ---------- formato binario proprio (carregar via mmap) ---------- */
 
-HOT Graph *graph_load_binary(const char *path) {
+HOT graph *graph_load_binary(const char *path) {
   int fd = open(path, O_RDONLY);
   if (UNLIKELY(fd < 0)) {
     fprintf(stderr, "graph_load_binary: nao foi possivel abrir '%s': %s\n",
@@ -355,7 +356,8 @@ HOT Graph *graph_load_binary(const char *path) {
   }
 
   struct stat st;
-  if (UNLIKELY(fstat(fd, &st) != 0 || (size_t)st.st_size < sizeof(BinHeader))) {
+  if (UNLIKELY(fstat(fd, &st) != 0 ||
+               (size_t)st.st_size < sizeof(struct bin_header))) {
     fprintf(stderr, "graph_load_binary: '%s' invalido ou truncado\n", path);
     close(fd);
     return NULL;
@@ -371,7 +373,7 @@ HOT Graph *graph_load_binary(const char *path) {
   }
   madvise(map, file_size, MADV_RANDOM); /* acesso a vizinhos e' bem espalhado */
 
-  const BinHeader *header = (const BinHeader *)map;
+  const struct bin_header *header = map;
   if (UNLIKELY(header->magic != BIN_MAGIC || header->version != BIN_VERSION)) {
     fprintf(stderr, "graph_load_binary: '%s' com magic/versao incompativel\n",
             path);
@@ -379,7 +381,7 @@ HOT Graph *graph_load_binary(const char *path) {
     return NULL;
   }
 
-  size_t expected_size = sizeof(BinHeader) +
+  size_t expected_size = sizeof(struct bin_header) +
                          ((size_t)header->n + 1) * sizeof(uint32_t) +
                          (size_t)(2 * header->m) * sizeof(uint32_t);
   if (UNLIKELY(expected_size != file_size)) {
@@ -391,7 +393,7 @@ HOT Graph *graph_load_binary(const char *path) {
     return NULL;
   }
 
-  Graph *g = (Graph *)calloc(1, sizeof(Graph));
+  graph *g = calloc(1, sizeof(*g));
   if (UNLIKELY(!g)) {
     munmap(map, file_size);
     return NULL;
@@ -402,7 +404,7 @@ HOT Graph *graph_load_binary(const char *path) {
   g->mmap_base = map;
   g->mmap_len = file_size;
 
-  const char *after_header = (const char *)map + sizeof(BinHeader);
+  const char *after_header = (const char *)map + sizeof(struct bin_header);
   g->offset = (uint32_t *)after_header;
   g->adjacency =
       (uint32_t *)(after_header + ((size_t)g->n + 1) * sizeof(uint32_t));
@@ -410,7 +412,7 @@ HOT Graph *graph_load_binary(const char *path) {
   return g;
 }
 
-void graph_free(Graph *g) {
+void graph_free(graph *g) {
   if (!g) {
     return;
   }
@@ -424,7 +426,7 @@ void graph_free(Graph *g) {
   free(g);
 }
 
-int graph_has_edge(const Graph *g, uint32_t u, uint32_t v) {
+int graph_has_edge(const graph *g, uint32_t u, uint32_t v) {
   uint32_t degree_u, degree_v;
   const uint32_t *nbrs_u = graph_neighbors(g, u, &degree_u);
   const uint32_t *nbrs_v = graph_neighbors(g, v, &degree_v);
