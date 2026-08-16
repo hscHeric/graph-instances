@@ -207,8 +207,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--timeout-s",
         type=float,
-        default=300,
-        help="Tempo máximo por grafo; use 0 para desativar",
+        default=21_600,
+        help="Tempo máximo por grafo; padrão: 21600 segundos (6 horas)",
     )
     parser.add_argument(
         "--ignorar-sem-arestas",

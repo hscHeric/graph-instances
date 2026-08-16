@@ -363,7 +363,7 @@ Parâmetros adicionais:
 | `--db-name BASE` | Salva o banco em `datasets/BASE/features.sqlite3`. |
 | `--max-vertices N` | Pula grafos maiores que o limite; padrão 500.000, zero desativa. |
 | `--memory-limit-mb MB` | Memória máxima por subprocesso; padrão 4.096 MB. |
-| `--timeout-s SEGUNDOS` | Tempo máximo por grafo; padrão 300, zero desativa. |
+| `--timeout-s SEGUNDOS` | Tempo máximo por grafo; padrão 21.600 (6 horas), zero desativa. |
 | `--only-select` | Não calcula features; seleciona usando somente o banco atual. |
 | `--ignorar-sem-arestas` | Ignora grafos vazios ou formados somente por vértices isolados. |
 | `--usar-todos-se-faltar` | Usa todos os disponíveis quando a base possuir menos arquivos que `--n`. |
