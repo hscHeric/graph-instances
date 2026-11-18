@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Download the Harwell-Boeing collection from SuiteSparse.
+"""Download the Harwell-Boeing collection from NIST Matrix Market.
 
-Queries the SuiteSparse Matrix Collection (``group="HB"``) through ``ssgetpy``,
-downloads missing Matrix Market (``.mtx``) archives concurrently into
-``$PROJECT_ROOT/datasets/harwell_boeing/raw/``, and flattens nested ``.mtx``
-files into the raw directory root.
+Discovers all Harwell-Boeing matrix sets from the official NIST Matrix Market
+index (``https://math.nist.gov/pub/MatrixMarket2/Harwell-Boeing/``), downloads
+compressed Matrix Market (``.mtx.gz``) files concurrently, decompresses each
+matrix atomically into ``$PROJECT_ROOT/datasets/harwell_boeing/raw/<name>.mtx``,
+and skips matrices already present at the destination.
+
+This script queries NIST Matrix Market directly instead of ``ssgetpy`` /
+SuiteSparse (whose static S3 files can be offline with HTTP 403).
 
 Environment Variables:
     PROJECT_ROOT: Required path to the repository root containing ``datasets/``.
@@ -12,128 +16,256 @@ Environment Variables:
         concurrent download threads (default: ``15``).
 
 Notes:
-    * Existing flat ``<matrix.name>.mtx`` files are skipped without checksum
-      verification; any download exception propagates immediately.
-    * Not all Harwell-Boeing matrices are square and symmetric; eligibility is
-      filtered later by ``scripts/convert/matrix_market.py``.
+    * Existing ``<name>.mtx`` files are skipped without checksum verification.
+    * Matrices that lack a ``.mtx.gz`` download on Matrix Market are reported
+      as ``NO MTX`` and skipped without failing the run.
+    * Not all Harwell-Boeing matrices are square and symmetric; graph
+      eligibility is filtered later by ``scripts/convert/matrix_market.py``.
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from shutil import move
+from shutil import copyfileobj
 
-def download_matrix(matrix, destination: Path) -> bool:
-    """Download and extract a SuiteSparse matrix if its ``.mtx`` is absent.
+import requests
 
-    Args:
-        matrix: SuiteSparse ``Matrix`` descriptor returned by ``ssgetpy``.
-        destination: Raw dataset directory where the matrix is stored.
+
+# Official NIST Matrix Market URLs hosting the Harwell-Boeing collection.
+NIST_BASE_URL = "https://math.nist.gov"
+HB_INDEX_URL = f"{NIST_BASE_URL}/pub/MatrixMarket2/Harwell-Boeing/"
+HB_DATA_URL = f"{NIST_BASE_URL}/MatrixMarket/data/Harwell-Boeing"
+HB_PUB_URL = f"{NIST_BASE_URL}/pub/MatrixMarket2/Harwell-Boeing"
+
+REQUEST_TIMEOUT_S = 120
+SET_LINK_PATTERN = re.compile(
+    r'href=["\']/MatrixMarket/data/Harwell-Boeing/([^/"\']+)/\1\.html["\']',
+    re.IGNORECASE,
+)
+MATRIX_LINK_PATTERN = re.compile(
+    r'<li[^>]*>\s*<a\s+href=["\']([^/"\']+)\.html["\']',
+    re.IGNORECASE,
+)
+MTX_GZ_LINK_PATTERN = re.compile(
+    r'href=["\'](/pub/MatrixMarket2/Harwell-Boeing/[^"\']+\.mtx\.gz)["\']',
+    re.IGNORECASE,
+)
+
+
+def discover_sets() -> list[str]:
+    """Fetch the NIST Harwell-Boeing index and return all matrix set names.
 
     Returns:
-        ``True`` if the matrix was downloaded; ``False`` if
-        ``<destination>/<matrix.name>.mtx`` already existed.
-    """
-    if (destination / f"{matrix.name}.mtx").exists():
-        return False
-
-    matrix.download(format="MM", destpath=str(destination), extract=True)
-    return True
-
-
-def download_matrices_in_parallel(matrices, destination: Path, workers: int) -> None:
-    """Download and extract a collection of matrices concurrently.
-
-    Args:
-        matrices: Iterable of SuiteSparse ``Matrix`` descriptors.
-        destination: Target raw dataset directory.
-        workers: Maximum number of concurrent worker threads.
+        Ordered list of unique set identifiers (e.g. ``"bcspwr"``, ``"bcsstruc1"``).
 
     Raises:
-        Exception: Propagates any download or extraction error raised by
-            ``ssgetpy`` in a worker thread.
+        requests.RequestException: If fetching the index page fails.
+        RuntimeError: If no Harwell-Boeing set links are found in the index.
     """
+    response = requests.get(HB_INDEX_URL, timeout=REQUEST_TIMEOUT_S)
+    response.raise_for_status()
+    sets = list(dict.fromkeys(SET_LINK_PATTERN.findall(response.text)))
+    if not sets:
+        raise RuntimeError(
+            f"No Harwell-Boeing matrix sets were found at {HB_INDEX_URL}."
+        )
+    return sets
+
+
+def discover_set_matrices(set_name: str) -> list[tuple[str, str]]:
+    """Fetch a NIST Harwell-Boeing set page and list its matrices.
+
+    Args:
+        set_name: Harwell-Boeing set slug (e.g. ``"bcspwr"``).
+
+    Returns:
+        List of ``(set_name, matrix_name)`` tuples discovered on the set page.
+
+    Raises:
+        requests.RequestException: If fetching the set page fails.
+    """
+    url = f"{HB_DATA_URL}/{set_name}/{set_name}.html"
+    response = requests.get(url, timeout=REQUEST_TIMEOUT_S)
+    response.raise_for_status()
+    matrices = [
+        name
+        for name in dict.fromkeys(MATRIX_LINK_PATTERN.findall(response.text))
+        if name.lower() != set_name.lower()
+    ]
+    return [(set_name, name) for name in matrices]
+
+
+def discover_matrices(workers: int) -> list[tuple[str, str]]:
+    """Discover all Harwell-Boeing ``(set_name, matrix_name)`` entries in parallel.
+
+    Args:
+        workers: Maximum number of concurrent HTTP requests.
+
+    Returns:
+        Sorted list of unique ``(set_name, matrix_name)`` pairs.
+
+    Raises:
+        RuntimeError: If no matrices are discovered across all sets.
+    """
+    sets = discover_sets()
+    entries: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(discover_set_matrices, set_name): set_name
+            for set_name in sets
+        }
+        for future in as_completed(futures):
+            for set_name, matrix_name in future.result():
+                entries.setdefault(matrix_name, set_name)
+
+    if not entries:
+        raise RuntimeError("No matrices were found in the Harwell-Boeing collection.")
+    return sorted((set_name, matrix_name) for matrix_name, set_name in entries.items())
+
+
+def resolve_fallback_mtx_url(set_name: str, matrix_name: str) -> str | None:
+    """Inspect a matrix's HTML page to find its exact ``.mtx.gz`` download link.
+
+    Args:
+        set_name: Harwell-Boeing set slug.
+        matrix_name: Matrix identifier on the set page.
+
+    Returns:
+        Full URL to the ``.mtx.gz`` file if linked on the matrix page;
+        otherwise ``None``.
+    """
+    page_url = f"{HB_DATA_URL}/{set_name}/{matrix_name}.html"
+    response = requests.get(page_url, timeout=REQUEST_TIMEOUT_S)
+    if response.status_code != 200:
+        return None
+    match = MTX_GZ_LINK_PATTERN.search(response.text)
+    if not match:
+        return None
+    return f"{NIST_BASE_URL}{match.group(1)}"
+
+
+def download_matrix(set_name: str, matrix_name: str, destination: Path) -> str:
+    """Download and atomically decompress one ``.mtx.gz`` file if absent.
+
+    Streams the compressed archive to ``.downloads/``, decompresses into a
+    temporary ``.mtx.tmp`` file, and atomically replaces ``<matrix_name>.mtx``
+    only after decompression completes cleanly.
+
+    Args:
+        set_name: Harwell-Boeing set slug.
+        matrix_name: Matrix identifier.
+        destination: Raw dataset root directory.
+
+    Returns:
+        ``"ALREADY EXISTS"`` if ``<matrix_name>.mtx`` already exists, ``"OK"``
+        if downloaded and decompressed, or ``"NO MTX"`` if the matrix has no
+        Matrix Market archive on NIST.
+
+    Raises:
+        requests.RequestException: If downloading fails with an HTTP/network error.
+        gzip.BadGzipFile: If the downloaded stream is not valid gzip data.
+        OSError: If writing or renaming temporary files fails.
+    """
+    target = destination / f"{matrix_name}.mtx"
+    if target.exists():
+        return "ALREADY EXISTS"
+
+    staging = destination / ".downloads"
+    staging.mkdir(parents=True, exist_ok=True)
+    archive_path = staging / f"{matrix_name}.mtx.gz.tmp"
+    extracted_path = staging / f"{matrix_name}.mtx.tmp"
+
+    url = f"{HB_PUB_URL}/{set_name}/{matrix_name}.mtx.gz"
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT_S, stream=True)
+        if response.status_code == 404:
+            response.close()
+            fallback_url = resolve_fallback_mtx_url(set_name, matrix_name)
+            if fallback_url is None:
+                return "NO MTX"
+            response = requests.get(fallback_url, timeout=REQUEST_TIMEOUT_S, stream=True)
+
+        with response:
+            response.raise_for_status()
+            with archive_path.open("wb") as archive_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        archive_file.write(chunk)
+
+        with gzip.open(archive_path, "rb") as compressed, extracted_path.open("wb") as output:
+            copyfileobj(compressed, output)
+        extracted_path.replace(target)
+        return "OK"
+    finally:
+        archive_path.unlink(missing_ok=True)
+        extracted_path.unlink(missing_ok=True)
+
+
+def download_matrices_in_parallel(
+    matrices: list[tuple[str, str]], destination: Path, workers: int
+) -> tuple[int, int, list[str]]:
+    """Download and decompress discovered matrices concurrently.
+
+    Args:
+        matrices: Sequence of ``(set_name, matrix_name)`` tuples.
+        destination: Raw dataset root directory.
+        workers: Maximum number of concurrent worker threads.
+
+    Returns:
+        Tuple ``(downloaded_count, skipped_no_mtx_count, failed_names)``.
+    """
+    downloaded_count = 0
+    no_mtx_count = 0
+    failures: list[str] = []
+
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
-            executor.submit(download_matrix, matrix, destination): matrix
-            for matrix in matrices
+            executor.submit(download_matrix, set_name, matrix_name, destination): matrix_name
+            for set_name, matrix_name in matrices
         }
 
         total = len(downloads)
         for completed, future in enumerate(as_completed(downloads), start=1):
-            matrix = downloads[future]
-            downloaded = future.result()
-            status = "OK" if downloaded else "ALREADY EXISTS"
-            print(f"  [{completed}/{total}] {status}: {matrix.name}")
+            matrix_name = downloads[future]
+            try:
+                status = future.result()
+                print(f"  [{completed}/{total}] {status}: {matrix_name}")
+                if status == "OK":
+                    downloaded_count += 1
+                elif status == "NO MTX":
+                    no_mtx_count += 1
+            except (requests.RequestException, gzip.BadGzipFile, EOFError, OSError) as error:
+                print(f"  [{completed}/{total}] FAILED: {matrix_name}: {error}")
+                failures.append(matrix_name)
 
+    staging = destination / ".downloads"
+    try:
+        staging.rmdir()
+    except OSError:
+        pass
 
-def move_matrices_to_root(destination: Path) -> int:
-    """Move nested ``.mtx`` files into the raw directory root.
-
-    Removes subdirectories left empty after moving matrices. Non-``.mtx``
-    files are left in place.
-
-    Args:
-        destination: Raw dataset root directory.
-
-    Returns:
-        Number of ``.mtx`` files moved into ``destination``.
-
-    Raises:
-        FileExistsError: If a destination ``.mtx`` file already exists.
-    """
-    moved_files = 0
-
-    for source in destination.rglob("*.mtx"):
-        if source.parent == destination:
-            continue
-
-        target = destination / source.name
-        if target.exists():
-            raise FileExistsError(
-                f"Could not move {source}: file {target} already exists."
-            )
-
-        move(source, target)
-        moved_files += 1
-
-    # Remove only directories left empty after moving files.
-    directories = sorted(
-        (path for path in destination.rglob("*") if path.is_dir()),
-        key=lambda path: len(path.parts),
-        reverse=True,
-    )
-    for directory in directories:
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
-
-    return moved_files
+    return downloaded_count, no_mtx_count, failures
 
 
 def main() -> None:
-    """Query SuiteSparse for the Harwell-Boeing group, download, and flatten.
+    """Discover Harwell-Boeing matrices on NIST Matrix Market and download them.
 
-    Imports ``ssgetpy`` after argument parsing so ``--help`` works without
-    initializing the library. Reads ``PROJECT_ROOT`` (required) and
-    ``HARWELL_BOEING_DOWNLOAD_WORKERS`` (optional positive integer, default
-    ``15``) from the environment.
+    Reads ``PROJECT_ROOT`` (required) and ``HARWELL_BOEING_DOWNLOAD_WORKERS``
+    (optional positive integer, default ``15``) from the environment.
 
     Raises:
-        RuntimeError: If ``PROJECT_ROOT`` is unset or SuiteSparse returns no
-            Harwell-Boeing matrices.
+        RuntimeError: If ``PROJECT_ROOT`` is unset or no matrices are found.
         ValueError: If ``HARWELL_BOEING_DOWNLOAD_WORKERS`` is invalid.
-        FileExistsError: If flattening collides with an existing ``.mtx`` file.
+        SystemExit: Exits with status ``1`` if one or more downloads fail.
     """
     argparse.ArgumentParser(
-        description="Download the Harwell-Boeing collection from SuiteSparse."
+        description="Download the Harwell-Boeing collection from NIST Matrix Market."
     ).parse_args()
-    # Defer ssgetpy import so --help succeeds without initializing SuiteSparse metadata.
-    import ssgetpy
 
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
@@ -144,10 +276,6 @@ def main() -> None:
 
     destination = Path(project_root) / "datasets" / "harwell_boeing" / "raw"
     destination.mkdir(parents=True, exist_ok=True)
-
-    matrices = ssgetpy.search(group="HB", limit=10_000)
-    if not matrices:
-        raise RuntimeError("No matrices were found in the Harwell-Boeing collection.")
 
     try:
         workers = int(os.environ.get("HARWELL_BOEING_DOWNLOAD_WORKERS", "15"))
@@ -160,14 +288,22 @@ def main() -> None:
             "HARWELL_BOEING_DOWNLOAD_WORKERS must be at least 1."
         )
 
+    print(f"Discovering Harwell-Boeing matrices from {HB_INDEX_URL}")
+    matrices = discover_matrices(workers)
     print(
         f"Downloading {len(matrices)} matrices to {destination} "
         f"with {workers} concurrent downloads"
     )
-    download_matrices_in_parallel(matrices, destination, workers)
-
-    moved_files = move_matrices_to_root(destination)
-    print(f"{moved_files} .mtx files moved to {destination}")
+    downloaded_count, no_mtx_count, failures = download_matrices_in_parallel(
+        matrices, destination, workers
+    )
+    print(
+        f"Completed: {downloaded_count} downloaded, "
+        f"{no_mtx_count} without .mtx.gz, {len(failures)} failed."
+    )
+    if failures:
+        print(f"{len(failures)} matrices failed: {', '.join(sorted(failures))}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

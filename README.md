@@ -299,5 +299,5 @@ python graph_instances.py select snap --help
 | Selection is slow | Use fewer/smaller inputs or inspect `--exact-triangle-edges`, `--triangle-samples`, and `--max-vertices` via `select <dataset> --help`. Filtering alone does not calculate structural features. |
 
 Detailed per-script behavior, environment variables, and invariants are
-documented directly in the docstrings of `graph_instances.py` and the scripts
-under `scripts/`.
+documented in the [command and technical reference](docs/reference.md) and in
+the docstrings of `graph_instances.py` and the scripts under `scripts/`.
