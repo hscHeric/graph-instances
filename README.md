@@ -258,8 +258,11 @@ datasets/
     processed/        Converted .col files ready for your program
     selected/         Optional representative subset
     features.sqlite3  Cached measurements used by selection
+    selection.csv     Plot-ready table (features, clusters, PCA coordinates)
+    metadata.json     Provenance, seeds, parameters, and selection summary
   cubic/
     processed/        Generated .col files ready for your program
+    metadata.json     Generation seeds, parameters, and per-graph manifest
 ```
 
 Generated graphs go straight to `processed/`. Downloaded graphs pass through

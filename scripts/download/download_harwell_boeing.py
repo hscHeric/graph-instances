@@ -29,11 +29,17 @@ import argparse
 import gzip
 import os
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import copyfileobj
 
 import requests
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 # Official NIST Matrix Market URLs hosting the Harwell-Boeing collection.
@@ -149,12 +155,31 @@ def resolve_fallback_mtx_url(set_name: str, matrix_name: str) -> str | None:
     return f"{NIST_BASE_URL}{match.group(1)}"
 
 
+def _is_missing_mtx_response(response: requests.Response) -> bool:
+    """Detect both HTTP 404 and NIST's HTTP 200 HTML soft-404 responses.
+
+    NIST Matrix Market returns an HTTP 200 ``text/html`` error page for
+    matrices whose Matrix Market export was withdrawn (e.g. elemental
+    finite-element matrices).
+
+    Args:
+        response: Open HTTP response for a ``.mtx.gz`` request.
+
+    Returns:
+        ``True`` if the response indicates the ``.mtx.gz`` file is absent.
+    """
+    content_type = response.headers.get("Content-Type", "").lower()
+    return response.status_code == 404 or "text/html" in content_type
+
+
 def download_matrix(set_name: str, matrix_name: str, destination: Path) -> str:
     """Download and atomically decompress one ``.mtx.gz`` file if absent.
 
     Streams the compressed archive to ``.downloads/``, decompresses into a
     temporary ``.mtx.tmp`` file, and atomically replaces ``<matrix_name>.mtx``
-    only after decompression completes cleanly.
+    only after decompression completes cleanly. Handles both HTTP 404 and NIST
+    HTML soft-404 responses by checking the matrix page before returning
+    ``"NO MTX"``.
 
     Args:
         set_name: Harwell-Boeing set slug.
@@ -183,12 +208,15 @@ def download_matrix(set_name: str, matrix_name: str, destination: Path) -> str:
     url = f"{HB_PUB_URL}/{set_name}/{matrix_name}.mtx.gz"
     try:
         response = requests.get(url, timeout=REQUEST_TIMEOUT_S, stream=True)
-        if response.status_code == 404:
+        if _is_missing_mtx_response(response):
             response.close()
             fallback_url = resolve_fallback_mtx_url(set_name, matrix_name)
             if fallback_url is None:
                 return "NO MTX"
             response = requests.get(fallback_url, timeout=REQUEST_TIMEOUT_S, stream=True)
+            if _is_missing_mtx_response(response):
+                response.close()
+                return "NO MTX"
 
         with response:
             response.raise_for_status()
@@ -297,10 +325,29 @@ def main() -> None:
     downloaded_count, no_mtx_count, failures = download_matrices_in_parallel(
         matrices, destination, workers
     )
+    metadata_path = update_metadata(
+        resolve_metadata_path(destination),
+        "download",
+        {
+            **base_provenance(("requests",)),
+            "source": HB_INDEX_URL,
+            "destination": str(destination),
+            "workers": workers,
+            "summary": {
+                "catalog_size": len(matrices),
+                "downloaded_this_run": downloaded_count,
+                "already_present": len(matrices) - downloaded_count - no_mtx_count - len(failures),
+                "without_mtx": no_mtx_count,
+                "failed": len(failures),
+            },
+            "failures": sorted(failures),
+        },
+    )
     print(
         f"Completed: {downloaded_count} downloaded, "
         f"{no_mtx_count} without .mtx.gz, {len(failures)} failed."
     )
+    print(f"Metadata saved to {metadata_path}")
     if failures:
         print(f"{len(failures)} matrices failed: {', '.join(sorted(failures))}")
         raise SystemExit(1)

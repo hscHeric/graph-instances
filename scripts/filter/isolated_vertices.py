@@ -26,7 +26,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 def count_isolated_vertices(path: Path) -> int:
@@ -132,6 +138,8 @@ def main() -> None:
         parser.error("input must be an existing .col file or directory")
 
     scanned = affected = errors = 0
+    affected_records: list[dict[str, object]] = []
+    error_records: list[dict[str, str]] = []
     for path in files:
         scanned += 1
         try:
@@ -141,10 +149,39 @@ def main() -> None:
                     path.unlink()
                 affected += 1
                 action = "REMOVED" if args.remove_isolated else "WOULD REMOVE"
+                affected_records.append(
+                    {
+                        "file": path.name,
+                        "path": str(path),
+                        "isolated_vertices": isolated,
+                        "removed": args.remove_isolated,
+                    }
+                )
                 print(f"{action}: {path}: {isolated} isolated vertices")
         except (OSError, ValueError, MemoryError) as error:
             errors += 1
+            error_records.append({"file": str(path), "error": str(error)})
             print(f"ERROR (not removed): {path}: {error}")
+
+    if args.input is not None and args.input.is_dir():
+        metadata_path = update_metadata(
+            resolve_metadata_path(args.input),
+            "isolation_filter",
+            {
+                **base_provenance(),
+                "target": str(args.input),
+                "mode": "remove" if args.remove_isolated else "dry_run",
+                "summary": {
+                    "scanned": scanned,
+                    "affected": affected,
+                    "errors": errors,
+                },
+                "affected_graphs": affected_records,
+                "errors": error_records,
+            },
+        )
+        print(f"Metadata saved to {metadata_path}")
+
     print(f"Scanned: {scanned}; graphs with isolated vertices: {affected}; errors: {errors}")
     if errors:
         raise SystemExit(1)

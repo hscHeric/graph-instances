@@ -19,9 +19,16 @@ from __future__ import annotations
 
 import argparse
 import math
+import secrets
+import sys
 from pathlib import Path
 
 import networkx as nx
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 # Fixed uniform vertex degree for cubic (3-regular) graphs.
@@ -111,8 +118,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Initial seed for reproducibility (default: 42)",
+        default=None,
+        help="Initial seed for reproducibility (default: random)",
     )
     parser.add_argument(
         "--out",
@@ -181,9 +188,20 @@ def main() -> None:
     output_directory.mkdir(parents=True, exist_ok=True)
 
     total = 0
-    seed = args.seed
+    attempted = 0
+    skipped_isolated = 0
+    generated_graphs: list[dict[str, object]] = []
+    if args.seed is None:
+        initial_seed = secrets.randbelow(2**31)
+        seed_source = "random"
+        print(f"Using random initial seed: {initial_seed}")
+    else:
+        initial_seed = args.seed
+        seed_source = "cli"
+    seed = initial_seed
     for n in vertex_counts:
         for repetition in range(args.reps):
+            attempted += 1
             graph = nx.random_regular_graph(DEGREE, n, seed=seed)
             if any(degree != DEGREE for _, degree in graph.degree()):
                 raise RuntimeError("NetworkX generated a graph that is not 3-regular")
@@ -193,6 +211,7 @@ def main() -> None:
             if args.remove_isolated and any(degree == 0 for _, degree in graph.degree()):
                 file_path.unlink(missing_ok=True)
                 print(f"REMOVED/SKIPPED: {name}: isolated vertices")
+                skipped_isolated += 1
                 seed += 1
                 continue
             save_dimacs(
@@ -203,6 +222,15 @@ def main() -> None:
                     f"repetition={repetition} seed={seed}"
                 ),
             )
+            generated_graphs.append(
+                {
+                    "file": name,
+                    "n_vertices": graph.number_of_nodes(),
+                    "n_edges": graph.number_of_edges(),
+                    "repetition": repetition,
+                    "seed": seed,
+                }
+            )
             print(
                 f"OK: {name}: {graph.number_of_nodes()} vertices, "
                 f"{graph.number_of_edges()} edges"
@@ -210,7 +238,32 @@ def main() -> None:
             total += 1
             seed += 1
 
+    metadata_path = update_metadata(
+        resolve_metadata_path(output_directory),
+        "generation",
+        {
+            **base_provenance(("networkx",)),
+            "model": "cubic",
+            "output_directory": str(output_directory),
+            "initial_seed": initial_seed,
+            "seed_source": seed_source,
+            "parameters": {
+                "degree": DEGREE,
+                "vertex_counts": vertex_counts,
+                "doubling": None if args.n is not None else list(args.doubling),
+                "reps": args.reps,
+                "remove_isolated": args.remove_isolated,
+            },
+            "summary": {
+                "attempted": attempted,
+                "generated": total,
+                "skipped_isolated": skipped_isolated,
+            },
+            "graphs": generated_graphs,
+        },
+    )
     print(f"Completed: {total} graphs generated in {output_directory}")
+    print(f"Metadata saved to {metadata_path}")
 
 
 if __name__ == "__main__":

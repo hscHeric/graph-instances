@@ -53,6 +53,7 @@ import re
 import resource
 import shutil
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -66,8 +67,21 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import numpy as np
 import scipy.sparse
 from scipy.sparse.csgraph import connected_components, shortest_path
+from scipy.stats import ks_2samp
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import (
+    base_provenance,
+    resolve_metadata_path,
+    sha256_file,
+    update_metadata,
+)
 
 
 # Cache schema version; increment whenever feature computation semantics change.
@@ -152,6 +166,36 @@ class CSRGraph:
     n_vertices: int
     n_edges: int
     matrix: scipy.sparse.csr_matrix
+
+
+@dataclass(slots=True)
+class ClusteringResult:
+    """Outputs of K-Means clustering and representative selection for plotting and metadata.
+
+    Attributes:
+        clusters: 1D array of cluster IDs assigned to each graph.
+        selected: Ordered list of indices chosen as cluster representatives.
+        selection_methods: Mapping from selected graph index to
+            ``"cluster_centroid"`` or ``"farthest_first_fallback"``.
+        standardized_matrix: 2D array after optional ``log1p`` and ``StandardScaler``.
+        scaler: Fitted ``StandardScaler`` instance used on the clustered pool.
+        centroids: 2D array of K-Means cluster centers in standardized space.
+        distances_to_centroid: 1D array of Euclidean distances from each graph
+            to its assigned cluster centroid.
+        inertia: Sum of squared distances to cluster centers reported by K-Means.
+        silhouette: Silhouette coefficient in standardized space, or ``None``
+            when ``n_clusters`` is outside ``[2, n_graphs - 1]``.
+    """
+
+    clusters: np.ndarray
+    selected: list[int]
+    selection_methods: dict[int, str]
+    standardized_matrix: np.ndarray
+    scaler: StandardScaler
+    centroids: np.ndarray
+    distances_to_centroid: np.ndarray
+    inertia: float
+    silhouette: float | None
 
 
 def format_feature_for_csv(feature: str, value: float) -> int | str:
@@ -778,43 +822,162 @@ def has_vertices_and_edges(file_path: Path) -> bool:
     return bool(header and header[0] > 0 and header[1] > 0)
 
 
+def resolve_csv_path(args: argparse.Namespace) -> Path:
+    """Resolve the destination path for the plot-ready selection CSV.
+
+    Uses ``args.csv`` if explicitly provided; otherwise writes
+    ``selection.csv`` beside ``selected/`` (or inside ``args.out``).
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        Destination CSV file path.
+    """
+    if args.csv is not None:
+        return args.csv
+    if args.out.name == "selected":
+        return args.out.parent / "selection.csv"
+    return args.out / "selection.csv"
+
+
+def compute_pca_projection(
+    standardized_matrix: np.ndarray, centroids: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, list[float], dict[str, dict[str, float]], PCA | None]:
+    """Project standardized graphs and cluster centroids onto 2D PCA coordinates.
+
+    Handles degenerate cases (single graph or zero total variance) without
+    raising warnings, always returning 2-column ``float64`` coordinate arrays,
+    explained variance ratios, and feature loadings for explaining axes in a
+    paper.
+
+    Args:
+        standardized_matrix: 2D standardized feature array ``(n_graphs, n_features)``.
+        centroids: 2D K-Means cluster centers ``(n_clusters, n_features)``.
+
+    Returns:
+        Tuple ``(points_2d, centroids_2d, explained_variance_ratio, loadings, pca_model)``.
+    """
+    n_graphs, n_features = standardized_matrix.shape
+    n_clusters = centroids.shape[0]
+    points_2d = np.zeros((n_graphs, 2), dtype=np.float64)
+    centroids_2d = np.zeros((n_clusters, 2), dtype=np.float64)
+    explained = [0.0, 0.0]
+    loadings: dict[str, dict[str, float]] = {
+        "pc1": {feature: 0.0 for feature in FEATURES},
+        "pc2": {feature: 0.0 for feature in FEATURES},
+    }
+
+    n_components = min(2, n_graphs, n_features)
+    if n_graphs < 2 or n_components < 1 or np.allclose(standardized_matrix, 0.0):
+        return points_2d, centroids_2d, explained, loadings, None
+
+    pca = PCA(n_components=n_components)
+    projected_points = pca.fit_transform(standardized_matrix)
+    projected_centroids = pca.transform(centroids)
+    points_2d[:, :n_components] = projected_points
+    centroids_2d[:, :n_components] = projected_centroids
+    for idx, ratio in enumerate(pca.explained_variance_ratio_):
+        explained[idx] = float(ratio) if math.isfinite(float(ratio)) else 0.0
+    for idx in range(n_components):
+        key = f"pc{idx + 1}"
+        loadings[key] = {
+            feature: round(float(pca.components_[idx, col]), 6)
+            for col, feature in enumerate(FEATURES)
+        }
+    return points_2d, centroids_2d, explained, loadings, pca
+
+
+def _distribution_stats(values: np.ndarray) -> dict[str, float]:
+    """Compute descriptive summary statistics for a 1D feature vector.
+
+    Args:
+        values: 1D ``float64`` array of feature observations.
+
+    Returns:
+        Dictionary containing ``min``, ``q25``, ``median``, ``q75``, ``max``,
+        ``mean``, and ``std``.
+    """
+    q25, median, q75 = np.quantile(values, (0.25, 0.5, 0.75))
+    return {
+        "min": round(float(values.min()), 6),
+        "q25": round(float(q25), 6),
+        "median": round(float(median), 6),
+        "q75": round(float(q75), 6),
+        "max": round(float(values.max()), 6),
+        "mean": round(float(values.mean()), 6),
+        "std": round(float(values.std()), 6),
+    }
+
+
+def compute_feature_coverage_summary(
+    pool_matrix: np.ndarray, selected_indices: list[int]
+) -> dict[str, dict[str, object]]:
+    """Compare feature distributions between the clustered pool and selected subset.
+
+    For each feature in :data:`FEATURES`, computes descriptive quantiles,
+    range coverage ratio ``(sel_max - sel_min) / (pool_max - pool_min)``, and
+    the two-sample Kolmogorov-Smirnov test statistic and p-value.
+
+    Args:
+        pool_matrix: 2D ``float64`` raw feature matrix for the clustered pool.
+        selected_indices: Row indices selected as representatives.
+
+    Returns:
+        Mapping from feature name to pool/selected stats, coverage ratio, and
+        KS test results.
+    """
+    selected_matrix = pool_matrix[selected_indices]
+    summary: dict[str, dict[str, object]] = {}
+    for col, feature in enumerate(FEATURES):
+        pool_col = pool_matrix[:, col]
+        sel_col = selected_matrix[:, col]
+        pool_span = float(pool_col.max() - pool_col.min())
+        sel_span = float(sel_col.max() - sel_col.min())
+        coverage = (sel_span / pool_span) if pool_span > 0.0 else 1.0
+        ks_result = ks_2samp(pool_col, sel_col)
+        ks_stat = float(ks_result.statistic)
+        ks_p = float(ks_result.pvalue)
+        summary[feature] = {
+            "pool": _distribution_stats(pool_col),
+            "selected": _distribution_stats(sel_col),
+            "range_coverage": round(coverage, 6),
+            "ks_statistic": round(ks_stat, 6) if math.isfinite(ks_stat) else None,
+            "ks_pvalue": round(ks_p, 6) if math.isfinite(ks_p) else None,
+        }
+    return summary
+
+
 def save_csv(
     file_path: Path,
-    names: list[str],
-    matrix: np.ndarray,
-    clusters: np.ndarray,
-    selected: list[int],
+    rows: list[dict[str, object]],
 ) -> None:
-    """Export features, cluster assignments, and selection flags to CSV.
+    """Export plot-ready selection records (all eligible graphs) to CSV.
 
     Args:
         file_path: Destination CSV path (parent directories created as needed).
-        names: Ordered list of graph filenames matching rows of ``matrix``.
-        matrix: 2D ``float64`` feature array of shape ``(len(names), len(FEATURES))``.
-        clusters: 1D array of K-Means cluster indices for each graph.
-        selected: Indices of graphs chosen as cluster representatives.
+        rows: Pre-formatted row dictionaries matching the CSV schema.
     """
-    selected_set = set(selected)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
-            file, fieldnames=["file", "cluster", "selected", *FEATURES]
+            file,
+            fieldnames=[
+                "file",
+                "series",
+                "in_clustered_pool",
+                "cluster",
+                "selected",
+                "selection_method",
+                "triangle_mode",
+                "distance_to_centroid",
+                "pc1",
+                "pc2",
+                *FEATURES,
+            ],
         )
         writer.writeheader()
-        for index, name in enumerate(names):
-            writer.writerow(
-                {
-                    "file": name,
-                    "cluster": int(clusters[index]),
-                    "selected": index in selected_set,
-                    **{
-                        feature: format_feature_for_csv(
-                            feature, matrix[index, column]
-                        )
-                        for column, feature in enumerate(FEATURES)
-                    },
-                }
-            )
+        writer.writerows(rows)
 
 
 def _worker(
@@ -1205,9 +1368,26 @@ def load_features(
     return names, matrix, failures
 
 
+def apply_log_scale(matrix: np.ndarray, log_scale: bool) -> np.ndarray:
+    """Apply optional ``log1p`` scaling to heavy-tailed feature columns.
+
+    Args:
+        matrix: 2D ``float64`` raw feature matrix.
+        log_scale: If ``True``, apply ``np.log1p`` to :data:`LOG_SCALED_FEATURE_INDICES`.
+
+    Returns:
+        Transformed 2D ``float64`` copy.
+    """
+    transformed = matrix.astype(np.float64, copy=True)
+    if log_scale:
+        for column in LOG_SCALED_FEATURE_INDICES:
+            transformed[:, column] = np.log1p(np.maximum(transformed[:, column], 0.0))
+    return transformed
+
+
 def transform_features_for_clustering(
     matrix: np.ndarray, log_scale: bool
-) -> np.ndarray:
+) -> tuple[np.ndarray, StandardScaler]:
     """Prepare the feature matrix for distance-based clustering.
 
     Optionally applies ``log1p`` to non-negative heavy-tailed scale features
@@ -1219,18 +1399,16 @@ def transform_features_for_clustering(
         log_scale: If ``True``, apply ``np.log1p`` to scale features first.
 
     Returns:
-        Standardized 2D ``float64`` feature matrix.
+        Tuple ``(standardized_matrix, fitted_scaler)``.
     """
-    transformed = matrix.astype(np.float64, copy=True)
-    if log_scale:
-        for column in LOG_SCALED_FEATURE_INDICES:
-            transformed[:, column] = np.log1p(np.maximum(transformed[:, column], 0.0))
-    return StandardScaler().fit_transform(transformed)
+    transformed = apply_log_scale(matrix, log_scale)
+    scaler = StandardScaler()
+    return scaler.fit_transform(transformed), scaler
 
 
 def select_representatives_kmeans(
     matrix: np.ndarray, target_count: int, seed: int, log_scale: bool
-) -> tuple[np.ndarray, list[int]]:
+) -> ClusteringResult:
     """Cluster standardized feature vectors with K-Means and pick representatives.
 
     Chooses the graph nearest each non-empty cluster centroid in Euclidean
@@ -1245,21 +1423,29 @@ def select_representatives_kmeans(
         log_scale: Forwarded to :func:`transform_features_for_clustering`.
 
     Returns:
-        Tuple ``(cluster_labels, selected_indices)``.
+        :class:`ClusteringResult` containing labels, selected indices,
+        selection methods, standardized matrix, fitted scaler, centroids,
+        centroid distances, inertia, and silhouette score.
     """
     n_graphs = matrix.shape[0]
-    standardized_matrix = transform_features_for_clustering(matrix, log_scale)
+    standardized_matrix, scaler = transform_features_for_clustering(matrix, log_scale)
     kmeans = KMeans(n_clusters=target_count, random_state=seed, n_init=10)
     clusters = kmeans.fit_predict(standardized_matrix)
+    centroids = kmeans.cluster_centers_
+    distances_to_centroid = np.linalg.norm(
+        standardized_matrix - centroids[clusters], axis=1
+    )
 
     selected: list[int] = []
+    selection_methods: dict[int, str] = {}
     for cluster in range(target_count):
         indices = np.where(clusters == cluster)[0]
         if not len(indices):
             continue
-        points = standardized_matrix[indices]
-        distances = np.linalg.norm(points - kmeans.cluster_centers_[cluster], axis=1)
-        selected.append(int(indices[np.argmin(distances)]))
+        distances = distances_to_centroid[indices]
+        chosen_idx = int(indices[np.argmin(distances)])
+        selected.append(chosen_idx)
+        selection_methods[chosen_idx] = "cluster_centroid"
 
     # Greedy farthest-first fallback when duplicate points produce empty clusters.
     if len(selected) < target_count:
@@ -1271,9 +1457,28 @@ def select_representatives_kmeans(
                 for index in remaining
             ]
             best_pos = int(np.argmax(min_distances))
-            selected.append(remaining.pop(best_pos))
+            chosen_idx = remaining.pop(best_pos)
+            selected.append(chosen_idx)
+            selection_methods[chosen_idx] = "farthest_first_fallback"
 
-    return clusters, selected
+    unique_clusters = np.unique(clusters).size
+    silhouette: float | None = None
+    if 2 <= unique_clusters < n_graphs:
+        raw_silhouette = float(silhouette_score(standardized_matrix, clusters))
+        if math.isfinite(raw_silhouette):
+            silhouette = raw_silhouette
+
+    return ClusteringResult(
+        clusters=clusters,
+        selected=selected,
+        selection_methods=selection_methods,
+        standardized_matrix=standardized_matrix,
+        scaler=scaler,
+        centroids=centroids,
+        distances_to_centroid=distances_to_centroid,
+        inertia=float(kmeans.inertia_),
+        silhouette=silhouette,
+    )
 
 
 def temporal_series_key(filename: str) -> str | None:
@@ -1299,7 +1504,7 @@ def collapse_temporal_series(
     max_per_series: int,
     seed: int,
     log_scale: bool,
-) -> tuple[list[str], np.ndarray]:
+) -> tuple[list[str], np.ndarray, dict[str, dict[str, int]]]:
     """Reduce oversized temporal snapshot series before global clustering.
 
     Any recognized snapshot series containing more than ``max_per_series``
@@ -1316,10 +1521,13 @@ def collapse_temporal_series(
         log_scale: Forwarded to within-series K-Means.
 
     Returns:
-        Filtered ``(names, matrix)`` tuple preserving deterministic ordering.
+        Tuple ``(filtered_names, filtered_matrix, collapsed_report)`` preserving
+        deterministic ordering and recording ``{"before": N, "after": K}`` for
+        each capped series.
     """
     series_groups: dict[str, list[int]] = {}
     kept_indices: list[int] = []
+    collapsed_report: dict[str, dict[str, int]] = {}
     for index, name in enumerate(names):
         series = temporal_series_key(name)
         if series is None:
@@ -1332,18 +1540,22 @@ def collapse_temporal_series(
         if len(group) <= max_per_series:
             kept_indices.extend(group)
             continue
-        _, local_selected = select_representatives_kmeans(
+        series_result = select_representatives_kmeans(
             matrix[group], max_per_series, seed, log_scale
         )
-        chosen = [group[pos] for pos in local_selected]
+        chosen = [group[pos] for pos in series_result.selected]
         kept_indices.extend(chosen)
+        collapsed_report[series_name] = {
+            "before": len(group),
+            "after": len(chosen),
+        }
         print(
             f"Temporal series '{series_name}': kept {len(chosen)} of {len(group)} "
             f"representative snapshots"
         )
 
     kept_indices.sort()
-    return [names[index] for index in kept_indices], matrix[kept_indices]
+    return [names[index] for index in kept_indices], matrix[kept_indices], collapsed_report
 
 
 def main() -> None:
@@ -1434,15 +1646,18 @@ def main() -> None:
         raise RuntimeError("no graph was processed successfully")
 
     log_scale = not args.no_log_scale
+    all_eligible_names = list(names)
+    all_eligible_matrix = matrix.copy()
+    eligible_before_series_cap = len(all_eligible_names)
+    collapsed_series: dict[str, dict[str, int]] = {}
     if args.max_per_series > 0:
-        before_count = len(names)
-        names, matrix = collapse_temporal_series(
+        names, matrix, collapsed_series = collapse_temporal_series(
             names, matrix, args.max_per_series, args.seed, log_scale
         )
-        if len(names) < before_count:
+        if len(names) < eligible_before_series_cap:
             print(
                 f"After temporal series cap (--max-per-series {args.max_per_series}): "
-                f"{len(names)} of {before_count} graphs enter global clustering"
+                f"{len(names)} of {eligible_before_series_cap} graphs enter global clustering"
             )
 
     target_count = args.n
@@ -1458,8 +1673,13 @@ def main() -> None:
         )
         target_count = len(names)
 
-    clusters, selected = select_representatives_kmeans(
+    clustering = select_representatives_kmeans(
         matrix, target_count, args.seed, log_scale
+    )
+    clusters = clustering.clusters
+    selected = clustering.selected
+    points_2d, centroids_2d, pca_variance_ratio, pca_loadings, pca_model = (
+        compute_pca_projection(clustering.standardized_matrix, clustering.centroids)
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -1468,24 +1688,189 @@ def main() -> None:
         if existing.name not in selected_names:
             existing.unlink()
 
+    selected_manifest: list[dict[str, object]] = []
+    cluster_representatives: dict[int, str] = {}
     print(f"Selected {len(selected)} graphs:")
     for index in selected:
         name = names[index]
+        cluster_id = int(clusters[index])
+        cluster_representatives.setdefault(cluster_id, name)
         values = {
             feature: matrix[index, column]
             for column, feature in enumerate(FEATURES)
         }
-        shutil.copy2(args.input_dir / name, args.out / name)
+        src_path = args.input_dir / name
+        dst_path = args.out / name
+        shutil.copy2(src_path, dst_path)
+        n_edges_int = int(values["n_edges"])
+        tri_mode = (
+            "exact"
+            if args.exact_triangle_edges == 0 or n_edges_int <= args.exact_triangle_edges
+            else "sampled"
+        )
+        selected_manifest.append(
+            {
+                "file": name,
+                "series": temporal_series_key(name),
+                "cluster": cluster_id,
+                "selection_method": clustering.selection_methods[index],
+                "triangle_mode": tri_mode,
+                "distance_to_centroid": round(float(clustering.distances_to_centroid[index]), 6),
+                "pc1": round(float(points_2d[index, 0]), 6),
+                "pc2": round(float(points_2d[index, 1]), 6),
+                "n_vertices": int(values["n_vertices"]),
+                "n_edges": n_edges_int,
+                "density": round(float(values["density"]), 6),
+                "mean_degree": round(float(values["mean_degree"]), 6),
+                "file_size_bytes": dst_path.stat().st_size,
+                "sha256": sha256_file(dst_path),
+            }
+        )
         print(
             f"  {name}: n={int(values['n_vertices'])}, "
-            f"m={int(values['n_edges'])}, "
+            f"m={n_edges_int}, "
             f"density={values['density']:.6f}, "
             f"mean degree={values['mean_degree']:.6f}"
         )
 
-    if args.csv:
-        save_csv(args.csv, names, matrix, clusters, selected)
-        print(f"Features saved to {args.csv}")
+    # Project all eligible graphs (including any snapshots capped by --max-per-series)
+    # into the same standardized + PCA coordinate system for complete paper plots.
+    pool_index_by_name = {name: idx for idx, name in enumerate(names)}
+    all_scaled = clustering.scaler.transform(apply_log_scale(all_eligible_matrix, log_scale))
+    all_points_2d = np.zeros((len(all_eligible_names), 2), dtype=np.float64)
+    if pca_model is not None:
+        projected_all = pca_model.transform(all_scaled)
+        all_points_2d[:, : projected_all.shape[1]] = projected_all
+
+    csv_rows: list[dict[str, object]] = []
+    for row_idx, name in enumerate(all_eligible_names):
+        pool_idx = pool_index_by_name.get(name)
+        in_pool = pool_idx is not None
+        is_selected = in_pool and pool_idx in clustering.selection_methods
+        n_edges_int = int(all_eligible_matrix[row_idx, 1])
+        tri_mode = (
+            "exact"
+            if args.exact_triangle_edges == 0 or n_edges_int <= args.exact_triangle_edges
+            else "sampled"
+        )
+        if is_selected and pool_idx is not None:
+            method = clustering.selection_methods[pool_idx]
+        elif in_pool:
+            method = "not_selected"
+        else:
+            method = "series_capped"
+
+        if in_pool and pool_idx is not None:
+            cluster_val = int(clusters[pool_idx])
+            dist = float(clustering.distances_to_centroid[pool_idx])
+            dist_str = f"{0.0 if dist == 0.0 else dist:.6f}"
+            pc1 = float(points_2d[pool_idx, 0])
+            pc2 = float(points_2d[pool_idx, 1])
+        else:
+            cluster_val = -1
+            dist_str = ""
+            pc1 = float(all_points_2d[row_idx, 0])
+            pc2 = float(all_points_2d[row_idx, 1])
+
+        csv_rows.append(
+            {
+                "file": name,
+                "series": temporal_series_key(name) or "",
+                "in_clustered_pool": in_pool,
+                "cluster": cluster_val,
+                "selected": is_selected,
+                "selection_method": method,
+                "triangle_mode": tri_mode,
+                "distance_to_centroid": dist_str,
+                "pc1": f"{0.0 if pc1 == 0.0 else pc1:.6f}",
+                "pc2": f"{0.0 if pc2 == 0.0 else pc2:.6f}",
+                **{
+                    feature: format_feature_for_csv(
+                        feature, all_eligible_matrix[row_idx, column]
+                    )
+                    for column, feature in enumerate(FEATURES)
+                },
+            }
+        )
+
+    csv_path = resolve_csv_path(args)
+    save_csv(csv_path, csv_rows)
+    print(f"Features saved to {csv_path}")
+
+    centroids_pca = [
+        {
+            "cluster": cluster_id,
+            "pc1": round(float(centroids_2d[cluster_id, 0]), 6),
+            "pc2": round(float(centroids_2d[cluster_id, 1]), 6),
+            "size": int(np.sum(clusters == cluster_id)),
+            "representative": cluster_representatives.get(cluster_id),
+        }
+        for cluster_id in range(target_count)
+    ]
+    scaler_stats = {
+        feature: {
+            "mean": round(float(clustering.scaler.mean_[col]), 6),
+            "std": round(float(clustering.scaler.scale_[col]), 6),
+        }
+        for col, feature in enumerate(FEATURES)
+    }
+    feature_summary = compute_feature_coverage_summary(matrix, selected)
+    metadata_path = update_metadata(
+        resolve_metadata_path(args.out),
+        "selection",
+        {
+            **base_provenance(("numpy", "scipy", "scikit-learn")),
+            "input_dir": str(args.input_dir),
+            "output_dir": str(args.out),
+            "database_path": str(database_path),
+            "csv_path": str(csv_path),
+            "parameters": {
+                "requested_count": args.n,
+                "selected_count": len(selected),
+                "seed": args.seed,
+                "bfs_samples": args.bfs_samples,
+                "exact_triangle_edges": args.exact_triangle_edges,
+                "triangle_samples": args.triangle_samples,
+                "max_vertices": args.max_vertices,
+                "memory_limit_mb": args.memory_limit_mb,
+                "timeout_s": args.timeout_s,
+                "skip_edgeless": args.skip_edgeless,
+                "use_all_if_fewer": args.use_all_if_fewer,
+                "only_select": args.only_select,
+                "log_scale": log_scale,
+                "max_per_series": args.max_per_series,
+                "feature_version": FEATURE_VERSION,
+            },
+            "features": {
+                "all": list(FEATURES),
+                "log_scaled": [FEATURES[i] for i in LOG_SCALED_FEATURE_INDICES] if log_scale else [],
+            },
+            "summary": {
+                "eligible_before_series_cap": eligible_before_series_cap,
+                "clustered_pool": len(names),
+                "selected_count": len(selected),
+                "failed_or_skipped_count": len(failures),
+                "temporal_series_collapsed": collapsed_series,
+                "kmeans_inertia": round(clustering.inertia, 6),
+                "silhouette_score": (
+                    round(clustering.silhouette, 6)
+                    if clustering.silhouette is not None
+                    else None
+                ),
+                "pca_explained_variance_ratio": [
+                    round(pca_variance_ratio[0], 6),
+                    round(pca_variance_ratio[1], 6),
+                ],
+            },
+            "pca_loadings": pca_loadings,
+            "scaler_stats": scaler_stats,
+            "feature_summary": feature_summary,
+            "centroids_pca": centroids_pca,
+            "selected_graphs": selected_manifest,
+            "failures": [{"file": name, "reason": reason} for name, reason in failures],
+        },
+    )
+    print(f"Metadata saved to {metadata_path}")
     print(f"Graphs copied to {args.out}")
 
 

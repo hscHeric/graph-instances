@@ -17,9 +17,16 @@ from __future__ import annotations
 
 import argparse
 import math
+import secrets
+import sys
 from pathlib import Path
 
 import networkx as nx
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 def generate_geometric_progression(start: int, factor: float, steps: int) -> list[int]:
@@ -94,8 +101,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Initial seed for reproducibility (default: 42)",
+        default=None,
+        help="Initial seed for reproducibility (default: random)",
     )
     parser.add_argument(
         "--out",
@@ -172,16 +179,28 @@ def main() -> None:
     output_directory.mkdir(parents=True, exist_ok=True)
 
     total = 0
-    seed = args.seed
+    attempted = 0
+    skipped_isolated = 0
+    generated_graphs: list[dict[str, object]] = []
+    if args.seed is None:
+        initial_seed = secrets.randbelow(2**31)
+        seed_source = "random"
+        print(f"Using random initial seed: {initial_seed}")
+    else:
+        initial_seed = args.seed
+        seed_source = "cli"
+    seed = initial_seed
     for n in vertex_counts:
         for m in args.m:
             for repetition in range(args.reps):
+                attempted += 1
                 graph = nx.barabasi_albert_graph(n, m, seed=seed)
                 name = f"ba_n{n}_m{m}_{repetition}.col"
                 file_path = output_directory / name
                 if args.remove_isolated and any(degree == 0 for _, degree in graph.degree()):
                     file_path.unlink(missing_ok=True)
                     print(f"REMOVED/SKIPPED: {name}: isolated vertices")
+                    skipped_isolated += 1
                     seed += 1
                     continue
                 save_dimacs(
@@ -192,6 +211,16 @@ def main() -> None:
                         f"repetition={repetition} seed={seed}"
                     ),
                 )
+                generated_graphs.append(
+                    {
+                        "file": name,
+                        "n_vertices": graph.number_of_nodes(),
+                        "n_edges": graph.number_of_edges(),
+                        "m": m,
+                        "repetition": repetition,
+                        "seed": seed,
+                    }
+                )
                 print(
                     f"OK: {name}: {graph.number_of_nodes()} vertices, "
                     f"{graph.number_of_edges()} edges"
@@ -199,7 +228,32 @@ def main() -> None:
                 total += 1
                 seed += 1
 
+    metadata_path = update_metadata(
+        resolve_metadata_path(output_directory),
+        "generation",
+        {
+            **base_provenance(("networkx",)),
+            "model": "barabasi-albert",
+            "output_directory": str(output_directory),
+            "initial_seed": initial_seed,
+            "seed_source": seed_source,
+            "parameters": {
+                "vertex_counts": vertex_counts,
+                "doubling": None if args.n is not None else list(args.doubling),
+                "m": list(args.m),
+                "reps": args.reps,
+                "remove_isolated": args.remove_isolated,
+            },
+            "summary": {
+                "attempted": attempted,
+                "generated": total,
+                "skipped_isolated": skipped_isolated,
+            },
+            "graphs": generated_graphs,
+        },
+    )
     print(f"Completed: {total} graphs generated in {output_directory}")
+    print(f"Metadata saved to {metadata_path}")
 
 
 if __name__ == "__main__":

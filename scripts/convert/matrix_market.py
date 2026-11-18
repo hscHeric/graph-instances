@@ -29,11 +29,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import scipy.io
 import scipy.sparse
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 def read_matrix(mtx_path: Path):
@@ -112,7 +118,7 @@ def read_matrix(mtx_path: Path):
 
 def convert_file(
     mtx_path: Path, output_directory: Path, remove_isolated: bool = False
-) -> bool:
+) -> str:
     """Convert one square symmetric Matrix Market file to DIMACS ``.col``.
 
     Skips non-square or numerically asymmetric matrices, drops zero entries and
@@ -127,8 +133,8 @@ def convert_file(
             has no non-loop incident edge.
 
     Returns:
-        ``True`` if a ``.col`` file was written; ``False`` if the matrix failed
-        to load or was skipped.
+        Outcome status code: ``"ok"``, ``"failed_read"``, ``"non_square"``,
+        ``"asymmetric"``, or ``"isolated"``.
     """
     col_path = output_directory / f"{mtx_path.stem}.col"
 
@@ -136,7 +142,7 @@ def convert_file(
         matrix = read_matrix(mtx_path)
     except Exception as error:
         print(f"FAILED to read {mtx_path}: {error}")
-        return False
+        return "failed_read"
 
     n_rows, n_columns = matrix.shape
     if n_rows != n_columns:
@@ -144,7 +150,7 @@ def convert_file(
             f"SKIPPED {mtx_path.stem}: non-square matrix "
             f"({n_rows}x{n_columns}), does not represent a graph"
         )
-        return False
+        return "non_square"
 
     csr_matrix = scipy.sparse.csr_matrix(matrix)
     csr_matrix.eliminate_zeros()
@@ -155,7 +161,7 @@ def convert_file(
             f"SKIPPED {mtx_path.stem}: asymmetric matrix, "
             "does not represent an undirected graph"
         )
-        return False
+        return "asymmetric"
 
     # Remove self-loops before checking vertex degrees or emitting edges.
     csr_matrix.setdiag(0)
@@ -163,7 +169,7 @@ def convert_file(
     if remove_isolated and (csr_matrix.getnnz(axis=1) == 0).any():
         col_path.unlink(missing_ok=True)
         print(f"REMOVED/SKIPPED: {mtx_path.name}: isolated vertices")
-        return False
+        return "isolated"
 
     coo_matrix = csr_matrix.tocoo()
     edges: set[tuple[int, int]] = set()
@@ -190,7 +196,7 @@ def convert_file(
         f"OK: {mtx_path.stem} -> {n_rows} vertices, "
         f"{len(edges)} edges -> {col_path}"
     )
-    return True
+    return "ok"
 
 
 def find_matrices(input_path: Path) -> list[Path]:
@@ -261,9 +267,42 @@ def convert_dataset(
         names.add(path.stem)
 
     print(f"Converting {len(matrices)} matrices from {input_path} to {output_directory}")
-    converted = sum(
-        convert_file(file_path, output_directory, remove_isolated) for file_path in matrices
+    counts = {
+        "ok": 0,
+        "non_square": 0,
+        "asymmetric": 0,
+        "isolated": 0,
+        "failed_read": 0,
+    }
+    excluded: list[dict[str, str]] = []
+    for file_path in matrices:
+        status = convert_file(file_path, output_directory, remove_isolated)
+        counts[status] += 1
+        if status != "ok":
+            excluded.append({"file": file_path.name, "reason": status})
+
+    converted = counts["ok"]
+    metadata_path = update_metadata(
+        resolve_metadata_path(output_directory),
+        "conversion",
+        {
+            **base_provenance(("scipy",)),
+            "format": "matrix-market",
+            "input_path": str(input_path),
+            "output_directory": str(output_directory),
+            "parameters": {"remove_isolated": remove_isolated},
+            "summary": {
+                "total_matrices": len(matrices),
+                "converted": converted,
+                "skipped_non_square": counts["non_square"],
+                "skipped_asymmetric": counts["asymmetric"],
+                "skipped_isolated": counts["isolated"],
+                "failed_read": counts["failed_read"],
+            },
+            "excluded": excluded,
+        },
     )
+    print(f"Metadata saved to {metadata_path}")
     return converted, len(matrices)
 
 

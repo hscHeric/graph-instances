@@ -36,9 +36,15 @@ import csv
 import os
 import re
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 # Substrings identifying non-graph metadata, feature, label, or path files in SNAP archives.
@@ -340,7 +346,7 @@ def declared_vertex_count(path: Path) -> int | None:
 
 def convert_file(
     path: Path, output: Path, file_format: str, remove_isolated: bool = False
-) -> bool:
+) -> str:
     """Convert one SNAP file to DIMACS ``.col`` using a temporary SQLite store.
 
     Streams canonicalized undirected pairs into an on-disk SQLite database in
@@ -356,8 +362,7 @@ def convert_file(
             existing output file) when any vertex has no non-loop incident edge.
 
     Returns:
-        ``True`` if ``<stem>.col`` was written; ``False`` if the graph was
-        skipped due to isolated vertices or encountered a conversion error.
+        Outcome status code: ``"ok"``, ``"isolated"``, or ``"failed"``.
     """
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"{path.stem}.col"
@@ -415,7 +420,7 @@ def convert_file(
                 print(
                     f"REMOVED/SKIPPED: {path.name}: {isolated_vertices} isolated vertices"
                 )
-                return False
+                return "isolated"
 
         with destination.open("w", encoding="utf-8", newline="\n") as file:
             file.write(f"c Converted from {path.name}; direction, weights, and time ignored\n")
@@ -431,11 +436,11 @@ def convert_file(
                 file.write(f"e {u} {v}\n")
 
         print(f"OK: {path.name} -> {total_vertices} vertices, {total_edges} edges")
-        return True
+        return "ok"
     except Exception as error:
         destination.unlink(missing_ok=True)
         print(f"FAILED: {path}: {error}")
-        return False
+        return "failed"
     finally:
         if connection is not None:
             connection.close()
@@ -500,11 +505,40 @@ def main() -> None:
             raise ValueError(f"Multiple input files would overwrite {name}")
         output_names.add(name)
 
-    converted = sum(
-        convert_file(path, args.output, file_format, args.remove_isolated)
-        for path, file_format in selected
+    counts = {"ok": 0, "isolated": 0, "failed": 0}
+    format_counts: dict[str, int] = {}
+    excluded: list[dict[str, str]] = []
+    for path, file_format in selected:
+        format_counts[file_format] = format_counts.get(file_format, 0) + 1
+        status = convert_file(path, args.output, file_format, args.remove_isolated)
+        counts[status] += 1
+        if status != "ok":
+            excluded.append({"file": path.name, "format": file_format, "reason": status})
+
+    converted = counts["ok"]
+    metadata_path = update_metadata(
+        resolve_metadata_path(args.output),
+        "conversion",
+        {
+            **base_provenance(),
+            "format": "snap",
+            "input_path": str(args.input),
+            "output_directory": str(args.output),
+            "parameters": {"remove_isolated": args.remove_isolated},
+            "summary": {
+                "total_files": len(files),
+                "supported_graphs": len(selected),
+                "ignored_auxiliary": ignored,
+                "converted": converted,
+                "skipped_isolated": counts["isolated"],
+                "failed": counts["failed"],
+                "formats": dict(sorted(format_counts.items())),
+            },
+            "excluded": excluded,
+        },
     )
     print(f"Completed: {converted} of {len(selected)} graphs converted")
+    print(f"Metadata saved to {metadata_path}")
 
 
 if __name__ == "__main__":

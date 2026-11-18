@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import os
+import sys
 import tarfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +39,11 @@ from shutil import copyfileobj, move
 from urllib.parse import urlparse
 
 import requests
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 BASE_URL = "https://snap.stanford.edu/data"
@@ -336,10 +342,31 @@ def main() -> None:
             failures.append(name)
 
     moved, discarded = move_files_to_root(destination)
+    unique_failures = sorted(set(failures))
+    metadata_path = update_metadata(
+        resolve_metadata_path(destination),
+        "download",
+        {
+            **base_provenance(("requests",)),
+            "source": BASE_URL,
+            "destination": str(destination),
+            "workers": workers,
+            "include_friendster": args.include_friendster,
+            "summary": {
+                "catalog_size": len(urls),
+                "downloaded_this_run": len(downloaded_files),
+                "moved_files": moved,
+                "discarded_auxiliary": discarded,
+                "failed": len(unique_failures),
+            },
+            "failures": unique_failures,
+        },
+    )
     print(
         f"Organization complete: {moved} files moved to {destination} "
         f"and {discarded} auxiliary files discarded."
     )
+    print(f"Metadata saved to {metadata_path}")
 
     if failures:
         print(f"{len(failures)} files failed: {', '.join(sorted(set(failures)))}")

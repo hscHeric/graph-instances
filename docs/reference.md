@@ -77,7 +77,7 @@ directly to `datasets/<model>/processed/` (via dispatcher/mise) or
 | `--vertices`, `--n N [N ...]` | `None` | Explicit vertex counts; overrides `--doubling`. |
 | `--doubling START FACTOR STEPS` | `200 1.15 30` | Deduplicated geometric progression used when `--n` is omitted. |
 | `--count`, `--reps K` | `1` | Graphs generated per parameter combination (`K >= 1`). |
-| `--seed SEED` | `42` | Initial RNG seed; increments by 1 after every attempt (including skipped graphs). |
+| `--seed SEED` | Random | Initial RNG seed (drawn from OS entropy if omitted and printed); increments by 1 after every attempt (including skipped graphs). |
 | `--out DIR` | Model-specific | Output directory. |
 | `--remove-isolated` | Off | Discard entire graphs with any degree-0 vertex (not replaced). |
 
@@ -118,8 +118,10 @@ using compact NumPy/SciPy CSR arrays inside memory- and time-limited forked
 worker subprocesses (**Unix only**), caches results in SQLite WAL
 (`datasets/<dataset>/features.sqlite3`), clusters standardized vectors with
 K-Means (greedy farthest-first fallback for empty clusters), copies the graph
-nearest each centroid to `selected/` (removing stale `.col` files), and
-optionally exports `--csv`.
+nearest each centroid to `selected/` (removing stale `.col` files), writes a
+plot-ready CSV (`datasets/<dataset>/selection.csv`, including 2D PCA
+coordinates `pc1`/`pc2` and `distance_to_centroid`), and records full
+provenance and cluster centroids in `datasets/<dataset>/metadata.json`.
 
 **Features (16)**: `n_vertices`, `n_edges`, `density`, `minimum_degree`,
 `maximum_degree`, `mean_degree`, `median_degree`, `degree_std`,
@@ -144,7 +146,7 @@ optionally exports `--csv`.
 | `--skip-edgeless` | Off (On for SNAP) | Skip graphs whose header lacks `n > 0` and `m > 0`. |
 | `--use-all-if-fewer` | Off (On in presets) | Select all eligible graphs with a warning when fewer than `--n` exist. |
 | `--only-select` | Off | Cluster directly from existing SQLite rows without computing new features. |
-| `--csv FILE` | `None` | Export features, cluster IDs, and selection flags to CSV. |
+| `--csv FILE` | `datasets/<ds>/selection.csv` | Override output path for the plot-ready CSV (features, clusters, `distance_to_centroid`, `pc1`, `pc2`, selection flags). |
 | `--db FILE` / `--db-name NAME` | `datasets/<ds>/features.sqlite3` | Explicit SQLite path (removes `PROJECT_ROOT` requirement) or dataset folder name. |
 
 Cache rows are reused only when `(mtime_ns, size, bfs_samples, seed, feature_version=3, exact_triangle_edges, triangle_samples)` matches. Deleted input files are ignored even under `--only-select`. Legacy Portuguese SQLite column names are migrated to English automatically on open.

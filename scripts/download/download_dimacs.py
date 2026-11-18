@@ -25,12 +25,18 @@ import argparse
 import io
 import filecmp
 import os
+import sys
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import move
 
 import requests
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+from metadata_utils import base_provenance, resolve_metadata_path, update_metadata
 
 
 # Checked-in catalog of 78 DIMACS benchmark instances hosted on Network Repository.
@@ -237,7 +243,25 @@ def main() -> None:
                 failures.append(name)
 
     moved_files = move_files_to_root(destination)
+    metadata_path = update_metadata(
+        resolve_metadata_path(destination),
+        "download",
+        {
+            **base_provenance(("requests",)),
+            "source": BASE_URL,
+            "destination": str(destination),
+            "workers": workers,
+            "summary": {
+                "catalog_size": len(DIMACS_INSTANCES),
+                "succeeded": len(DIMACS_INSTANCES) - len(failures),
+                "failed": len(failures),
+                "moved_files": moved_files,
+            },
+            "failures": sorted(failures),
+        },
+    )
     print(f"{moved_files} files moved to {destination}")
+    print(f"Metadata saved to {metadata_path}")
 
     if failures:
         print(f"{len(failures)} instances failed: {', '.join(failures)}")

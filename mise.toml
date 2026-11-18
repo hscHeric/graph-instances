@@ -80,19 +80,19 @@ run = "python graph_instances.py convert all"
 
 [tasks."generate::watts_strogatz"]
 description = "Generate Watts-Strogatz graphs in DIMACS .col format"
-run = "python scripts/generate/watts_strogatz.py --doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1 --seed 42 --out datasets/watts_strogatz/processed"
+run = "python scripts/generate/watts_strogatz.py --doubling 200 1.15 30 --k 6 --p-rewire 0.1 --reps 1 --out datasets/watts_strogatz/processed"
 
 [tasks."generate::barabasi_albert"]
 description = "Generate Barabasi-Albert graphs in DIMACS .col format"
-run = "python scripts/generate/barabasi_albert.py --doubling 200 1.15 30 --m 4 --reps 1 --seed 42 --out datasets/barabasi_albert/processed"
+run = "python scripts/generate/barabasi_albert.py --doubling 200 1.15 30 --m 4 --reps 1 --out datasets/barabasi_albert/processed"
 
 [tasks."generate::erdos_renyi"]
 description = "Generate Erdos-Renyi graphs in DIMACS .col format"
-run = "python scripts/generate/erdos_renyi.py --doubling 200 1.15 30 --avg-degree 10 --reps 1 --seed 42 --out datasets/erdos_renyi/processed"
+run = "python scripts/generate/erdos_renyi.py --doubling 200 1.15 30 --avg-degree 10 --reps 1 --out datasets/erdos_renyi/processed"
 
 [tasks."generate::cubic"]
 description = "Generate random cubic graphs in DIMACS .col format"
-run = "python scripts/generate/cubic.py --doubling 200 1.15 30 --reps 1 --seed 42 --out datasets/cubic/processed"
+run = "python scripts/generate/cubic.py --doubling 200 1.15 30 --reps 1 --out datasets/cubic/processed"
 
 [tasks."generate::all"]
 description = "Generate all synthetic graph datasets with standard parameters"
