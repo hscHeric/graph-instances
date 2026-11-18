@@ -1,5 +1,33 @@
 #!/usr/bin/env python3
-"""Convert SNAP edge lists to simple DIMACS .col graphs."""
+"""Convert SNAP edge lists to simple DIMACS .col graphs.
+
+Scans a SNAP raw directory, classifies each file into one of seven supported
+network formats (ignoring auxiliary metadata, labels, features, readmes, and
+hidden bookkeeping files), normalizes endpoints to contiguous 1-based vertex
+IDs via a temporary on-disk SQLite database, removes self-loops and duplicate
+undirected edges, and writes simple unweighted DIMACS ``.col`` graphs.
+
+Supported Formats:
+    * ``whitespace``: Space/tab-separated ``.txt``, ``.edge``, ``.edges``,
+      ``.edgelist`` files (ignoring ``#`` and ``%`` comments).
+    * ``csv`` / ``tsv``: Delimited edge lists with automatic header detection.
+    * ``mooc``: ``mooc_actions.tsv`` bipartite interactions (namespaced as
+      ``user:<id>`` and ``target:<id>``).
+    * ``wiki_rfa``: ``wiki-RfA.txt`` key-value ``SRC:``/``TGT:`` records.
+    * ``wiki_elections``: ``wikiElec.ElecBs3.txt`` election/candidate/vote logs.
+    * ``temporal_matrix``: ``network<N>.csv`` ``P<i>_TO_P<j>`` interaction matrices.
+
+Environment Variables:
+    PROJECT_ROOT: Required path to the repository root containing ``datasets/``
+        (validated even when ``--input`` and ``--output`` are passed).
+
+Notes:
+    * Direction, weights, signs, and timestamps are discarded.
+    * Temporary ``snap_*.sqlite3`` files are created inside ``--output`` and
+      removed in ``finally``; large networks require substantial temporary disk.
+    * Per-file conversion errors remove partial outputs and continue the batch
+      without exiting nonzero; inspect the final summary line.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +41,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 
+# Substrings identifying non-graph metadata, feature, label, or path files in SNAP archives.
 AUXILIARY_TERMS = (
     "readme",
     "target",
@@ -32,7 +61,20 @@ AUXILIARY_TERMS = (
 
 
 def classify_file(path: Path) -> str | None:
-    """Identify the appropriate parser or return None for auxiliary files."""
+    """Identify the parser for a SNAP file or return ``None`` to ignore it.
+
+    Evaluates hidden paths, auxiliary filename patterns, excluded extensions,
+    special SNAP dataset filenames, and generic edge-list extensions in strict
+    precedence order.
+
+    Args:
+        path: Candidate file path inside the SNAP input directory.
+
+    Returns:
+        One of ``"whitespace"``, ``"csv"``, ``"tsv"``, ``"mooc"``,
+        ``"wiki_rfa"``, ``"wiki_elections"``, or ``"temporal_matrix"``; or
+        ``None`` if the file should be ignored as auxiliary.
+    """
     name = path.name.lower()
     if any(part.startswith(".") for part in path.parts):
         return None
@@ -66,6 +108,17 @@ def classify_file(path: Path) -> str | None:
 
 
 def read_whitespace(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield endpoint pairs from a whitespace-delimited edge list.
+
+    Skips blank lines and lines starting with ``#`` or ``%``, taking the first
+    two whitespace-separated fields from every remaining line.
+
+    Args:
+        path: Input edge-list file path.
+
+    Yields:
+        ``(source, target)`` vertex identifier strings.
+    """
     with path.open("r", encoding="utf-8", errors="replace") as file:
         for line in file:
             text = line.strip()
@@ -77,6 +130,19 @@ def read_whitespace(path: Path) -> Iterator[tuple[str, str]]:
 
 
 def read_delimited(path: Path, delimiter: str) -> Iterator[tuple[str, str]]:
+    """Yield endpoint pairs from a CSV or TSV edge list with header detection.
+
+    Skips blank lines and ``#`` comments, inspects the first row against known
+    header column names, and yields the stripped first two columns of each data
+    row.
+
+    Args:
+        path: Input delimited file path.
+        delimiter: Field separator character (e.g., ``","`` or ``"\\t"``).
+
+    Yields:
+        ``(source, target)`` vertex identifier strings.
+    """
     with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
         lines = (line for line in file if line.strip() and not line.startswith("#"))
         reader = csv.reader(lines, delimiter=delimiter)
@@ -102,6 +168,17 @@ def read_delimited(path: Path, delimiter: str) -> Iterator[tuple[str, str]]:
 
 
 def read_mooc(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield bipartite user-to-target edges from ``mooc_actions.tsv``.
+
+    Prefixes vertex names with ``user:`` and ``target:`` so identical numeric
+    IDs across the two partitions remain distinct vertices.
+
+    Args:
+        path: Path to ``mooc_actions.tsv``.
+
+    Yields:
+        ``("user:<USERID>", "target:<TARGETID>")`` pairs.
+    """
     with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
         reader = csv.DictReader(file, delimiter="\t")
         for line in reader:
@@ -109,6 +186,16 @@ def read_mooc(path: Path) -> Iterator[tuple[str, str]]:
 
 
 def read_wiki_rfa(path: Path) -> Iterator[tuple[str, str]]:
+    """Yield voter-to-candidate edges from Wikipedia RfA key-value records.
+
+    Pairs each ``SRC:`` line with the next ``TGT:`` line.
+
+    Args:
+        path: Path to ``wiki-RfA.txt``.
+
+    Yields:
+        ``(source, target)`` username strings.
+    """
     source: str | None = None
     with path.open("r", encoding="utf-8", errors="replace") as file:
         for line in file:
@@ -120,7 +207,19 @@ def read_wiki_rfa(path: Path) -> Iterator[tuple[str, str]]:
 
 
 def read_temporal_matrix(path: Path) -> Iterator[tuple[str, str]]:
-    """Aggregate connections observed at any time into one graph."""
+    """Aggregate temporal ``P<i>_TO_P<j>`` interaction matrices into one graph.
+
+    Emits marker self-loops ``(vertex, vertex)`` for every participant declared
+    in the CSV header so inactive participants are registered before loops are
+    stripped, then yields each undirected pair that has a non-zero value at any
+    timestep.
+
+    Args:
+        path: Path to a ``network<N>.csv`` temporal matrix file.
+
+    Yields:
+        Participant marker self-loops followed by unique undirected edges.
+    """
     with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
         reader = csv.reader(file)
         header = next(reader, [])
@@ -149,7 +248,22 @@ def read_temporal_matrix(path: Path) -> Iterator[tuple[str, str]]:
 
 
 def read_wiki_elections(path: Path) -> Iterator[tuple[str, str]]:
-    """Read voter-to-candidate edges from SNAP election records."""
+    """Read voter-to-candidate edges from SNAP Wikipedia election records.
+
+    Tracks election boundaries (``E``), candidate records (``U``, emitted as
+    marker self-loops so candidates with zero votes are retained), and vote
+    records (``V``).
+
+    Args:
+        path: Path to ``wikiElec.ElecBs3.txt``.
+
+    Yields:
+        Candidate marker self-loops and ``(voter_id, candidate_id)`` pairs.
+
+    Raises:
+        ValueError: If a vote record appears without an active candidate or
+            fewer than three whitespace-separated fields.
+    """
     candidate: str | None = None
     with path.open("r", encoding="utf-8") as file:
         for line in file:
@@ -169,6 +283,18 @@ def read_wiki_elections(path: Path) -> Iterator[tuple[str, str]]:
 
 
 def extract_edges(path: Path, file_format: str) -> Iterable[tuple[str, str]]:
+    """Dispatch a SNAP input file to the parser matching ``file_format``.
+
+    Args:
+        path: Path to the source SNAP file.
+        file_format: Format identifier returned by :func:`classify_file`.
+
+    Returns:
+        Iterable of raw ``(source, target)`` vertex identifier pairs.
+
+    Raises:
+        ValueError: If ``file_format`` is not recognized.
+    """
     if file_format == "whitespace":
         return read_whitespace(path)
     if file_format == "csv":
@@ -187,6 +313,17 @@ def extract_edges(path: Path, file_format: str) -> Iterable[tuple[str, str]]:
 
 
 def declared_vertex_count(path: Path) -> int | None:
+    """Extract the ``# Nodes: N`` metadata count from the top of a ``.txt`` file.
+
+    Inspects at most the first 20 lines of ``.txt`` files. Non-``.txt`` files
+    return ``None`` immediately.
+
+    Args:
+        path: Path to the source SNAP file.
+
+    Returns:
+        Declared node count if present in the first 20 lines; otherwise ``None``.
+    """
     if path.suffix.lower() != ".txt":
         return None
     pattern = re.compile(r"#\s*Nodes:\s*(\d+)", re.IGNORECASE)
@@ -204,7 +341,24 @@ def declared_vertex_count(path: Path) -> int | None:
 def convert_file(
     path: Path, output: Path, file_format: str, remove_isolated: bool = False
 ) -> bool:
-    """Convert a file using SQLite to limit memory usage."""
+    """Convert one SNAP file to DIMACS ``.col`` using a temporary SQLite store.
+
+    Streams canonicalized undirected pairs into an on-disk SQLite database in
+    50,000-row batches, registers all observed vertices prior to deleting
+    self-loops, reconciles against ``# Nodes:`` metadata, optionally discards
+    graphs with isolated vertices, and writes sorted 1-based edges.
+
+    Args:
+        path: Source SNAP file path.
+        output: Directory receiving ``<stem>.col`` and the temporary SQLite DB.
+        file_format: Parser name from :func:`classify_file`.
+        remove_isolated: If ``True``, discard the entire graph (and remove any
+            existing output file) when any vertex has no non-loop incident edge.
+
+    Returns:
+        ``True`` if ``<stem>.col`` was written; ``False`` if the graph was
+        skipped due to isolated vertices or encountered a conversion error.
+    """
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"{path.stem}.col"
     database_path: Path | None = None
@@ -217,6 +371,8 @@ def convert_file(
             database_path = Path(database.name)
 
         connection = sqlite3.connect(database_path)
+        # Sacrifice crash durability for throughput on a disposable per-file DB,
+        # while keeping temporary B-trees on disk and capping page cache to ~16 MiB.
         connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("PRAGMA synchronous=OFF")
         connection.execute("PRAGMA temp_store=FILE")
@@ -288,6 +444,15 @@ def convert_file(
 
 
 def parse_args() -> argparse.Namespace:
+    """Validate ``PROJECT_ROOT`` and parse SNAP converter CLI arguments.
+
+    Returns:
+        Parsed CLI arguments containing ``input``, ``output``, ``analyze``,
+        and ``remove_isolated``.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset.
+    """
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError("PROJECT_ROOT is not set.")
@@ -305,6 +470,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Classify SNAP raw files and convert all supported graphs to ``.col``.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset.
+        ValueError: If multiple selected inputs map to the same ``<stem>.col``.
+    """
     args = parse_args()
     files = sorted(path for path in args.input.rglob("*") if path.is_file())
     selected = [(path, file_format) for path in files if (file_format := classify_file(path))]

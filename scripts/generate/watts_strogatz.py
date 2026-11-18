@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Generate graphs for Watts-Strogatz in DIMACS .col format."""
+"""Generate graphs for Watts-Strogatz in DIMACS .col format.
+
+Constructs small-world graphs via ``networkx.watts_strogatz_graph`` from an
+initial ``--k``-nearest-neighbor ring lattice with rewiring probability
+``--p-rewire``, writing files named ``ws_n<n>_k<k>_p<p_rewire>_<rep>.col``.
+
+Notes:
+    * Requires ``1 <= k < n`` and ``0 <= p-rewire <= 1``. Odd ``k`` values emit
+      a warning because NetworkX rounds odd ``k`` down to ``k - 1`` (making
+      ``k = 1`` edgeless).
+    * With ``--remove-isolated``, graphs left with any degree-0 vertex after
+      rewiring are discarded (and any pre-existing matching file is unlinked)
+      without replacement, while ``--seed`` still advances by 1.
+    * Does not require ``PROJECT_ROOT``; default output directory is
+      ``random_watts_strogatz/`` when invoked directly.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +26,27 @@ import networkx as nx
 
 
 def generate_geometric_progression(start: int, factor: float, steps: int) -> list[int]:
-    """Generate a geometric progression of sizes without duplicates."""
+    """Generate a deduplicated geometric progression of rounded integer sizes.
+
+    Args:
+        start: Initial vertex count.
+        factor: Positive multiplicative growth factor per step.
+        steps: Number of progression steps.
+
+    Returns:
+        Ordered list of unique integer vertex counts ``round(start * factor**step)``.
+    """
     return list(dict.fromkeys(round(start * factor**step) for step in range(steps)))
 
 
 def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
-    """Save a simple graph in DIMACS .col format with vertices 1..n."""
+    """Write a simple NetworkX graph in DIMACS ``.col`` format (1-based IDs).
+
+    Args:
+        graph: Simple undirected graph to serialize.
+        path: Destination ``.col`` file path.
+        comment: Optional single-line comment written with a ``c `` prefix.
+    """
     mapping = {node: index for index, node in enumerate(graph.nodes(), start=1)}
     edges = sorted(
         tuple(sorted((mapping[u], mapping[v]))) for u, v in graph.edges()
@@ -31,6 +61,11 @@ def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options for the Watts-Strogatz generator.
+
+    Returns:
+        Parsed CLI namespace.
+    """
     parser = argparse.ArgumentParser(
         description="Generate graphs for Watts-Strogatz in DIMACS .col format"
     )
@@ -84,6 +119,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_vertex_counts(args: argparse.Namespace) -> list[int]:
+    """Return explicit vertex counts or expand and validate ``--doubling``.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        List of vertex counts to generate.
+
+    Raises:
+        ValueError: If ``--doubling`` parameters are invalid.
+    """
     if args.n is not None:
         return args.n
     start, factor, steps = args.doubling
@@ -99,7 +145,19 @@ def get_vertex_counts(args: argparse.Namespace) -> list[int]:
 
 
 def validate_arguments(args: argparse.Namespace, vertex_counts: list[int]) -> None:
-    """Validate parameters before generating any files."""
+    """Validate CLI parameters before generating any files.
+
+    Emits a warning if any ``k`` is odd (NetworkX rounds odd ``k`` down to
+    ``k - 1``).
+
+    Args:
+        args: Parsed CLI namespace.
+        vertex_counts: Resolved list of vertex counts.
+
+    Raises:
+        ValueError: If ``reps < 1``, any ``n < 1``, any ``k`` fails
+            ``1 <= k < n``, or any ``p_rewire`` is outside ``[0, 1]``.
+    """
     if args.reps < 1:
         raise ValueError("reps must be at least 1")
 
@@ -123,6 +181,11 @@ def validate_arguments(args: argparse.Namespace, vertex_counts: list[int]) -> No
 
 
 def main() -> None:
+    """Generate Watts-Strogatz graphs and save them as DIMACS ``.col`` files.
+
+    Raises:
+        ValueError: If any CLI argument fails validation.
+    """
     args = parse_args()
     vertex_counts = get_vertex_counts(args)
     validate_arguments(args, vertex_counts)

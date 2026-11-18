@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Generate graphs for Erdős-Rényi G(n, p) in DIMACS .col format."""
+"""Generate graphs for Erdős-Rényi G(n, p) in DIMACS .col format.
+
+Constructs simple undirected random graphs via ``networkx.erdos_renyi_graph``
+across explicit vertex counts (``--n``/``--vertices``) or a geometric
+progression (``--doubling``). Edge probability ``p`` is derived either from
+target average degrees (``p = min(avg_degree / (n - 1), 1.0)``) or from
+explicit probabilities (``--p``), writing files named
+``er_n<n>_deg<g>_<rep>.col`` or ``er_n<n>_p<p>_<rep>.col``.
+
+Notes:
+    * Does not require ``PROJECT_ROOT``; default output directory is
+      ``random_erdos_renyi/`` when invoked directly.
+    * With ``--remove-isolated``, graphs containing any degree-0 vertex are
+      discarded (and any pre-existing matching file is unlinked) without being
+      replaced, while ``--seed`` still advances by 1.
+    * ``nx.erdos_renyi_graph`` evaluates all O(n^2) pairs in memory.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +29,28 @@ import networkx as nx
 def generate_geometric_progression(
     start: int, factor: float, steps: int
 ) -> list[int]:
-    """Generate a geometric progression of sizes without duplicates."""
+    """Generate a deduplicated geometric progression of rounded integer sizes.
+
+    Args:
+        start: Initial vertex count.
+        factor: Positive multiplicative growth factor per step.
+        steps: Number of progression steps.
+
+    Returns:
+        Ordered list of unique integer vertex counts ``round(start * factor**step)``.
+    """
     values = [round(start * factor**step) for step in range(steps)]
     return list(dict.fromkeys(values))
 
 
 def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
-    """Save a simple graph in DIMACS .col format with vertices 1..n."""
+    """Write a simple NetworkX graph in DIMACS ``.col`` format (1-based IDs).
+
+    Args:
+        graph: Simple undirected graph to serialize.
+        path: Destination ``.col`` file path.
+        comment: Optional single-line comment written with a ``c `` prefix.
+    """
     mapping = {node: index for index, node in enumerate(graph.nodes(), start=1)}
     edges = sorted(
         tuple(sorted((mapping[u], mapping[v]))) for u, v in graph.edges()
@@ -34,6 +65,11 @@ def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options for the Erdős-Rényi generator.
+
+    Returns:
+        Parsed CLI namespace.
+    """
     parser = argparse.ArgumentParser(
         description="Generate graphs for Erdős-Rényi G(n, p) in DIMACS .col format"
     )
@@ -90,6 +126,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_vertex_counts(args: argparse.Namespace) -> list[int]:
+    """Return explicit vertex counts or expand and validate ``--doubling``.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        List of vertex counts to generate.
+
+    Raises:
+        ValueError: If ``--doubling`` parameters are non-finite, non-integer
+            for ``START``/``STEPS``, or out of range.
+    """
     if args.n is not None:
         vertex_counts = args.n
     else:
@@ -108,7 +156,16 @@ def get_vertex_counts(args: argparse.Namespace) -> list[int]:
 
 
 def validate_arguments(args: argparse.Namespace, vertex_counts: list[int]) -> None:
-    """Validate parameters before generating any files."""
+    """Validate CLI parameters before generating any files.
+
+    Args:
+        args: Parsed CLI namespace.
+        vertex_counts: Resolved list of vertex counts.
+
+    Raises:
+        ValueError: If ``reps < 1``, any ``n < 2``, any ``p`` is outside
+            ``(0, 1]``, or any ``avg_degree`` is non-finite or ``<= 0``.
+    """
     if args.reps < 1:
         raise ValueError("reps must be at least 1")
 
@@ -128,6 +185,11 @@ def validate_arguments(args: argparse.Namespace, vertex_counts: list[int]) -> No
 
 
 def main() -> None:
+    """Generate Erdős-Rényi graphs and save them as DIMACS ``.col`` files.
+
+    Raises:
+        ValueError: If any CLI argument fails validation.
+    """
     args = parse_args()
     vertex_counts = get_vertex_counts(args)
     validate_arguments(args, vertex_counts)

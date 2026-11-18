@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
-"""Download, convert, generate, select, and filter graph instances."""
+"""Download, convert, generate, select, and filter graph instances.
+
+Unified command-line dispatcher over the individual workflow scripts under
+``scripts/``. Runs each child script with the active Python interpreter
+(``sys.executable``), sets the working directory to the repository root, and
+injects ``PROJECT_ROOT`` into the child environment so workflows work without
+``mise`` or manual environment setup.
+
+Workflows:
+    * ``download``: Fetch raw collections into ``datasets/<name>/raw/``.
+    * ``convert``: Normalize raw files into simple undirected DIMACS ``.col``
+      graphs under ``datasets/<name>/processed/``.
+    * ``generate``: Build synthetic graphs into ``datasets/<model>/processed/``.
+    * ``select``: Cluster structural features and copy representative subsets
+      into ``datasets/<name>/selected/``.
+    * ``filter``: Inspect (and optionally delete with ``--remove-isolated``)
+      ``.col`` graphs containing isolated vertices in ``processed/`` and
+      ``selected/``.
+
+Usage:
+    python graph_instances.py COMMAND DATASET [SCRIPT_OPTIONS ...]
+
+Example:
+    python graph_instances.py generate cubic --vertices 100 200 --count 3
+"""
 
 from __future__ import annotations
 
@@ -10,14 +34,21 @@ import subprocess
 import sys
 
 
+# Absolute path to the repository root; exported to child processes as PROJECT_ROOT.
 ROOT = Path(__file__).resolve().parent
+
+# Canonical hyphenated names for downloaded and synthetic datasets.
 DOWNLOADED = ("harwell-boeing", "dimacs", "bhoslib", "snap")
 GENERATED = ("erdos-renyi", "barabasi-albert", "watts-strogatz", "cubic")
 DATASETS = (*DOWNLOADED, *GENERATED)
+
+# Default target subset size passed to representative_selection.py per dataset.
 SELECTION_SIZES = {
     "harwell-boeing": 50, "dimacs": 80, "bhoslib": 30, "snap": 20,
     "erdos-renyi": 30, "barabasi-albert": 30, "watts-strogatz": 30, "cubic": 30,
 }
+
+# Allowed dataset/model targets for each top-level CLI subcommand.
 COMMAND_TARGETS = {
     "download": DOWNLOADED, "convert": DOWNLOADED, "generate": GENERATED,
     "select": DATASETS, "filter": DATASETS,
@@ -25,8 +56,26 @@ COMMAND_TARGETS = {
 
 
 def main() -> None:
+    """Parse CLI arguments and dispatch the requested graph workflow.
+
+    Resolves dataset/model targets (supporting hyphenated or underscored names
+    as well as ``all``), injects dataset-specific default arguments, sets
+    ``PROJECT_ROOT`` to the repository root, and executes each child script
+    sequentially using the active Python interpreter.
+
+    Note:
+        User-supplied options are appended *after* injected defaults so later
+        argparse value options override preset defaults. When ``dataset`` is
+        ``all``, child scripts execute sequentially in catalog order and stop
+        immediately on the first nonzero exit code (no rollback is performed).
+
+    Raises:
+        SystemExit: Propagated with the child's nonzero exit code if any
+            dispatched script fails, or raised by ``argparse`` on invalid CLI
+            arguments.
+    """
     parser = argparse.ArgumentParser(
-        description=__doc__,
+        description="Download, convert, generate, select, and filter graph instances.",
         epilog="Example: python graph_instances.py generate cubic --vertices 100 200 --count 3",
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -50,6 +99,7 @@ def main() -> None:
         )
     args = parser.parse_args()
     options = args.options
+    # Strip a single leading "--" separator (e.g. from mise or manual passthrough).
     if options[:1] == ["--"]:
         options = options[1:]
     if args.dataset == "all":
@@ -58,6 +108,15 @@ def main() -> None:
         targets = (args.dataset,)
 
     def run(script: str, parameters: list[str]) -> None:
+        """Execute a repository script as a subprocess with ``PROJECT_ROOT`` set.
+
+        Args:
+            script: Path to the target script relative to ``ROOT``.
+            parameters: Command-line arguments forwarded to the script.
+
+        Raises:
+            SystemExit: If the child process exits with a nonzero status code.
+        """
         result = subprocess.run(
             [sys.executable, str(ROOT / script), *parameters],
             cwd=ROOT, env={**os.environ, "PROJECT_ROOT": str(ROOT)},
@@ -79,6 +138,7 @@ def main() -> None:
                     found = True
                     run("scripts/filter/isolated_vertices.py", [str(directory), *options])
             if not found:
+                # Still honor --help/-h even before processed/ or selected/ exist.
                 if "--help" in options or "-h" in options:
                     run("scripts/filter/isolated_vertices.py", ["--help"])
                 else:

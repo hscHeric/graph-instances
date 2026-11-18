@@ -1,5 +1,26 @@
 #!/usr/bin/env python3
-"""Inspect DIMACS graphs and optionally delete graphs with isolated vertices."""
+"""Inspect DIMACS graphs and optionally delete graphs with isolated vertices.
+
+Streams DIMACS ``.col`` files line by line using a compact 1-bit-per-vertex
+``bytearray`` bitset (~12.5 MB per 100 million vertices) without loading edge
+sets into memory. Reports graphs with one or more isolated vertices by default
+(dry run) and deletes entire affected ``.col`` files when ``--remove-isolated``
+is supplied.
+
+Validation Contract:
+    * Enforces a single ``p edge n m`` header with non-negative counts, valid
+      ``1..n`` endpoint bounds, known record prefixes (``c``, ``p``, ``e``),
+      and an exact edge-line count match.
+    * Self-loops (``u == v``) count toward ``m`` but do not establish a
+      neighbor, so loop-only vertices still count as isolated.
+    * Malformed or unreadable files are reported and left untouched; exit
+      status is ``1`` if any file raises an error.
+    * Does not check for duplicate undirected edges or repair files.
+
+Environment Variables:
+    PROJECT_ROOT: Required only when no positional ``input`` path is provided
+        (defaults to scanning ``datasets/*/processed`` and ``datasets/*/selected``).
+"""
 
 from __future__ import annotations
 
@@ -9,11 +30,24 @@ from pathlib import Path
 
 
 def count_isolated_vertices(path: Path) -> int:
-    """Scan edges with one bit per vertex; loops do not establish a neighbor.
+    """Count vertices with no non-loop incident edge using one bit per vertex.
 
-    This checks header syntax, endpoint bounds, and edge-line counts. It is
-    an isolation filter, not a duplicate-edge validator. Malformed files raise
-    ValueError and must not be deleted based on an incomplete scan.
+    Streams a DIMACS ``.col`` file line by line, validating header syntax,
+    endpoint bounds (``1..n``), and declared edge-line count. Self-loops
+    (``u == v``) count toward the edge-line total but do not mark a vertex as
+    having a neighbor. This function does not detect duplicate undirected edges.
+
+    Args:
+        path: Path to the DIMACS ``.col`` file to inspect.
+
+    Returns:
+        Number of declared vertices (``1..n``) that appear in no non-loop edge.
+
+    Raises:
+        ValueError: If the file has a missing/duplicate header, negative counts,
+            unknown records, out-of-range endpoints, or an edge-count mismatch.
+        OSError: If reading ``path`` fails.
+        MemoryError: If allocating the vertex bitset exceeds available memory.
     """
     vertex_count: int | None = None
     expected_edges = 0
@@ -32,6 +66,7 @@ def count_isolated_vertices(path: Path) -> int:
                     vertex_count, expected_edges = map(int, fields[2:])
                     if vertex_count < 0 or expected_edges < 0:
                         raise ValueError("negative vertex or edge count")
+                    # Allocate 1 bit per declared vertex (ceil(vertex_count / 8) bytes).
                     active = bytearray((vertex_count + 7) // 8)
                 elif fields[0] == "e":
                     if vertex_count is None or len(fields) != 3:
@@ -40,6 +75,7 @@ def count_isolated_vertices(path: Path) -> int:
                     if not (1 <= u <= vertex_count and 1 <= v <= vertex_count):
                         raise ValueError("vertex ID outside 1..n")
                     edge_count += 1
+                    # Self-loops do not give a vertex a distinct neighbor.
                     if u == v:
                         continue
                     for vertex in (u, v):
@@ -58,7 +94,20 @@ def count_isolated_vertices(path: Path) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    """Scan ``.col`` files and report or delete whole graphs with isolated vertices.
+
+    Without a positional ``input``, scans ``datasets/*/processed`` and
+    ``datasets/*/selected`` under ``PROJECT_ROOT``. Malformed or unreadable
+    files are reported and left untouched.
+
+    Raises:
+        SystemExit: Exits with status ``2`` on invalid CLI arguments or missing
+            ``PROJECT_ROOT``, or status ``1`` if one or more files raised an
+            error during scanning.
+    """
+    parser = argparse.ArgumentParser(
+        description="Inspect DIMACS graphs and optionally delete graphs with isolated vertices."
+    )
     parser.add_argument("input", nargs="?", type=Path, help="A .col file or a directory to scan recursively")
     parser.add_argument(
         "--remove-isolated", action="store_true",

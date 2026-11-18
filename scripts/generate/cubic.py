@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Generate random cubic graphs in DIMACS .col format."""
+"""Generate random cubic (3-regular) graphs in DIMACS .col format.
+
+Constructs simple 3-regular graphs via ``networkx.random_regular_graph`` across
+explicit vertex counts (``--n``/``--vertices``) or a geometric progression
+rounded up to even integers (``--doubling``), remapping vertices to ``1..n``
+and writing sorted undirected edges to ``cubic_n<n>_<rep>.col``.
+
+Notes:
+    * Every vertex count must be even and strictly greater than 3 (necessary
+      and sufficient for a simple 3-regular graph to exist).
+    * Does not require ``PROJECT_ROOT``; default output directory is
+      ``random_cubic_graphs/`` when invoked directly.
+    * ``--seed`` increments by 1 after each generation attempt for reproducible
+      multi-graph batches.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +24,27 @@ from pathlib import Path
 import networkx as nx
 
 
+# Fixed uniform vertex degree for cubic (3-regular) graphs.
 DEGREE = 3
 
 
 def generate_geometric_progression(
     start: int, factor: float, steps: int
 ) -> list[int]:
-    """Generate a geometric progression rounded to even integers."""
+    """Generate a deduplicated geometric progression rounded to even integers.
+
+    Each term starts from ``start`` and iteratively multiplies by ``factor``,
+    rounding to the nearest integer and incrementing odd values by 1 so that a
+    3-regular graph can exist.
+
+    Args:
+        start: Initial vertex count.
+        factor: Positive multiplicative growth factor per step.
+        steps: Number of progression steps to generate.
+
+    Returns:
+        Ordered list of unique even integer vertex counts.
+    """
     values: list[int] = []
     current = float(start)
     for _ in range(steps):
@@ -30,7 +58,13 @@ def generate_geometric_progression(
 
 
 def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
-    """Save a simple graph in DIMACS .col format with vertices 1..n."""
+    """Write a simple NetworkX graph in DIMACS ``.col`` format (1-based IDs).
+
+    Args:
+        graph: Simple undirected graph to serialize.
+        path: Destination ``.col`` file path.
+        comment: Optional single-line comment written with a ``c `` prefix.
+    """
     mapping = {node: index for index, node in enumerate(graph.nodes(), start=1)}
     edges = sorted(
         tuple(sorted((mapping[u], mapping[v]))) for u, v in graph.edges()
@@ -45,6 +79,11 @@ def save_dimacs(graph: nx.Graph, path: Path, comment: str = "") -> None:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options for the cubic graph generator.
+
+    Returns:
+        Parsed CLI namespace.
+    """
     parser = argparse.ArgumentParser(
         description="Generate random cubic graphs in DIMACS .col format"
     )
@@ -87,7 +126,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_vertex_counts(args: argparse.Namespace) -> list[int]:
-    """Get and validate the requested sizes."""
+    """Resolve and validate requested vertex counts for 3-regular graphs.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        List of validated even integer vertex counts greater than ``DEGREE``.
+
+    Raises:
+        ValueError: If ``--doubling`` parameters are invalid or any vertex
+            count is odd or ``<= 3``.
+    """
     if args.n is not None:
         vertex_counts = args.n
     else:
@@ -116,6 +166,12 @@ def get_vertex_counts(args: argparse.Namespace) -> list[int]:
 
 
 def main() -> None:
+    """Generate random cubic graphs and save them as DIMACS ``.col`` files.
+
+    Raises:
+        ValueError: If CLI parameters fail validation.
+        RuntimeError: If NetworkX produces a graph that is not 3-regular.
+    """
     args = parse_args()
     if args.reps < 1:
         raise ValueError("reps must be at least 1")

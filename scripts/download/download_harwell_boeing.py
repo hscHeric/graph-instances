@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Download the Harwell-Boeing collection from SuiteSparse."""
+"""Download the Harwell-Boeing collection from SuiteSparse.
+
+Queries the SuiteSparse Matrix Collection (``group="HB"``) through ``ssgetpy``,
+downloads missing Matrix Market (``.mtx``) archives concurrently into
+``$PROJECT_ROOT/datasets/harwell_boeing/raw/``, and flattens nested ``.mtx``
+files into the raw directory root.
+
+Environment Variables:
+    PROJECT_ROOT: Required path to the repository root containing ``datasets/``.
+    HARWELL_BOEING_DOWNLOAD_WORKERS: Optional positive integer controlling
+        concurrent download threads (default: ``15``).
+
+Notes:
+    * Existing flat ``<matrix.name>.mtx`` files are skipped without checksum
+      verification; any download exception propagates immediately.
+    * Not all Harwell-Boeing matrices are square and symmetric; eligibility is
+      filtered later by ``scripts/convert/matrix_market.py``.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +27,16 @@ from pathlib import Path
 from shutil import move
 
 def download_matrix(matrix, destination: Path) -> bool:
-    """Download and extract a matrix that does not exist at the destination."""
+    """Download and extract a SuiteSparse matrix if its ``.mtx`` is absent.
+
+    Args:
+        matrix: SuiteSparse ``Matrix`` descriptor returned by ``ssgetpy``.
+        destination: Raw dataset directory where the matrix is stored.
+
+    Returns:
+        ``True`` if the matrix was downloaded; ``False`` if
+        ``<destination>/<matrix.name>.mtx`` already existed.
+    """
     if (destination / f"{matrix.name}.mtx").exists():
         return False
 
@@ -19,7 +45,17 @@ def download_matrix(matrix, destination: Path) -> bool:
 
 
 def download_matrices_in_parallel(matrices, destination: Path, workers: int) -> None:
-    """Download and extract matrices using multiple threads."""
+    """Download and extract a collection of matrices concurrently.
+
+    Args:
+        matrices: Iterable of SuiteSparse ``Matrix`` descriptors.
+        destination: Target raw dataset directory.
+        workers: Maximum number of concurrent worker threads.
+
+    Raises:
+        Exception: Propagates any download or extraction error raised by
+            ``ssgetpy`` in a worker thread.
+    """
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
             executor.submit(download_matrix, matrix, destination): matrix
@@ -35,7 +71,20 @@ def download_matrices_in_parallel(matrices, destination: Path, workers: int) -> 
 
 
 def move_matrices_to_root(destination: Path) -> int:
-    """Move extracted .mtx files to the raw directory root."""
+    """Move nested ``.mtx`` files into the raw directory root.
+
+    Removes subdirectories left empty after moving matrices. Non-``.mtx``
+    files are left in place.
+
+    Args:
+        destination: Raw dataset root directory.
+
+    Returns:
+        Number of ``.mtx`` files moved into ``destination``.
+
+    Raises:
+        FileExistsError: If a destination ``.mtx`` file already exists.
+    """
     moved_files = 0
 
     for source in destination.rglob("*.mtx"):
@@ -67,7 +116,23 @@ def move_matrices_to_root(destination: Path) -> int:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    """Query SuiteSparse for the Harwell-Boeing group, download, and flatten.
+
+    Imports ``ssgetpy`` after argument parsing so ``--help`` works without
+    initializing the library. Reads ``PROJECT_ROOT`` (required) and
+    ``HARWELL_BOEING_DOWNLOAD_WORKERS`` (optional positive integer, default
+    ``15``) from the environment.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset or SuiteSparse returns no
+            Harwell-Boeing matrices.
+        ValueError: If ``HARWELL_BOEING_DOWNLOAD_WORKERS`` is invalid.
+        FileExistsError: If flattening collides with an existing ``.mtx`` file.
+    """
+    argparse.ArgumentParser(
+        description="Download the Harwell-Boeing collection from SuiteSparse."
+    ).parse_args()
+    # Defer ssgetpy import so --help succeeds without initializing SuiteSparse metadata.
     import ssgetpy
 
     project_root = os.environ.get("PROJECT_ROOT")

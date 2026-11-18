@@ -1,4 +1,29 @@
-"""Convert Matrix Market matrices to DIMACS .col graphs."""
+"""Convert Matrix Market matrices to DIMACS .col graphs.
+
+Transforms square, numerically symmetric Matrix Market (``.mtx``) files into
+simple, undirected, unweighted DIMACS ``.col`` graphs with 1-based vertex IDs.
+Non-square and asymmetric matrices are skipped rather than symmetrized.
+
+Pipeline:
+    1. Read each ``.mtx`` file via SciPy; if a coordinate header declares a
+       mismatched entry count, repair the count in a temporary copy without
+       modifying the source file.
+    2. Reject non-square or numerically asymmetric matrices.
+    3. Strip explicit zeros and diagonal self-loops.
+    4. When ``--remove-isolated`` is enabled, discard the entire graph (and
+       unlink any pre-existing ``<stem>.col``) if any vertex has degree 0.
+    5. Deduplicate undirected edges and write sorted 1-based ``e u v`` records.
+
+Environment Variables:
+    PROJECT_ROOT: Required path to the repository root containing ``datasets/``
+        (validated even when an explicit input path is provided).
+
+Limitations:
+    * Loads each sparse matrix and edge set in memory; not a streaming
+      converter for arbitrarily large matrices.
+    * Per-file read/skip failures are logged without returning a nonzero exit
+      status; inspect the final summary line for converted counts.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +37,23 @@ import scipy.sparse
 
 
 def read_matrix(mtx_path: Path):
-    """Read a matrix, correcting inconsistent coordinate metadata in a copy."""
+    """Read a Matrix Market file, repairing coordinate entry counts if needed.
+
+    Non-coordinate matrices are delegated directly to ``scipy.io.mmread``. For
+    coordinate matrices whose header entry count does not match the actual
+    number of non-comment data lines, a temporary copy with a corrected header
+    is created, read, and deleted without modifying the source file.
+
+    Args:
+        mtx_path: Path to the input ``.mtx`` file.
+
+    Returns:
+        Sparse matrix returned by ``scipy.io.mmread(..., spmatrix=True)``.
+
+    Raises:
+        ValueError: If a coordinate header lacks valid dimensions.
+        OSError: If reading the source or writing the temporary copy fails.
+    """
     with mtx_path.open("r", encoding="utf-8") as file:
         banner = file.readline()
         if not banner.lower().startswith("%%matrixmarket matrix coordinate"):
@@ -72,7 +113,23 @@ def read_matrix(mtx_path: Path):
 def convert_file(
     mtx_path: Path, output_directory: Path, remove_isolated: bool = False
 ) -> bool:
-    """Convert a square symmetric matrix to an undirected graph."""
+    """Convert one square symmetric Matrix Market file to DIMACS ``.col``.
+
+    Skips non-square or numerically asymmetric matrices, drops zero entries and
+    diagonal self-loops, optionally rejects graphs with any isolated vertex
+    (removing any pre-existing output file), and writes 1-based sorted
+    undirected edges.
+
+    Args:
+        mtx_path: Path to the source ``.mtx`` file.
+        output_directory: Directory where ``<stem>.col`` is written.
+        remove_isolated: If ``True``, discard the entire graph when any vertex
+            has no non-loop incident edge.
+
+    Returns:
+        ``True`` if a ``.col`` file was written; ``False`` if the matrix failed
+        to load or was skipped.
+    """
     col_path = output_directory / f"{mtx_path.stem}.col"
 
     try:
@@ -92,6 +149,7 @@ def convert_file(
     csr_matrix = scipy.sparse.csr_matrix(matrix)
     csr_matrix.eliminate_zeros()
 
+    # Matrix must be numerically symmetric to represent an undirected graph.
     if (csr_matrix != csr_matrix.transpose()).nnz != 0:
         print(
             f"SKIPPED {mtx_path.stem}: asymmetric matrix, "
@@ -99,6 +157,7 @@ def convert_file(
         )
         return False
 
+    # Remove self-loops before checking vertex degrees or emitting edges.
     csr_matrix.setdiag(0)
     csr_matrix.eliminate_zeros()
     if remove_isolated and (csr_matrix.getnnz(axis=1) == 0).any():
@@ -135,7 +194,17 @@ def convert_file(
 
 
 def find_matrices(input_path: Path) -> list[Path]:
-    """Recursively find .mtx files in the input path."""
+    """Recursively discover ``.mtx`` files from a file or directory path.
+
+    Args:
+        input_path: Single ``.mtx`` file or directory to search recursively.
+
+    Returns:
+        Sorted list of discovered ``.mtx`` paths.
+
+    Raises:
+        ValueError: If ``input_path`` is neither a directory nor a ``.mtx`` file.
+    """
     if input_path.is_dir():
         return sorted(input_path.rglob("*.mtx"))
     if input_path.is_file() and input_path.suffix.lower() == ".mtx":
@@ -144,7 +213,15 @@ def find_matrices(input_path: Path) -> list[Path]:
 
 
 def find_datasets(datasets: Path) -> list[tuple[Path, Path]]:
-    """Find raw and processed directories for all datasets."""
+    """Discover ``(raw, processed)`` directory pairs under ``datasets/``.
+
+    Args:
+        datasets: Path to the top-level ``datasets/`` directory.
+
+    Returns:
+        Sorted list of ``(raw_dir, processed_dir)`` pairs for every existing
+        ``datasets/*/raw`` directory.
+    """
     return [
         (raw, raw.parent / "processed")
         for raw in sorted(datasets.glob("*/raw"))
@@ -155,7 +232,23 @@ def find_datasets(datasets: Path) -> list[tuple[Path, Path]]:
 def convert_dataset(
     input_path: Path, output_directory: Path, remove_isolated: bool = False
 ) -> tuple[int, int]:
-    """Convert all Matrix Market files in a dataset."""
+    """Convert all Matrix Market files under an input path into one directory.
+
+    Verifies that no two input files share the same stem before converting any
+    file.
+
+    Args:
+        input_path: ``.mtx`` file or directory of ``.mtx`` files.
+        output_directory: Destination directory for generated ``.col`` files.
+        remove_isolated: Forwarded to :func:`convert_file`.
+
+    Returns:
+        Tuple ``(converted_count, total_found)``.
+
+    Raises:
+        ValueError: If ``input_path`` is invalid or multiple matrices share the
+            same stem.
+    """
     matrices = find_matrices(input_path)
     if not matrices:
         print(f"No .mtx files found in {input_path}")
@@ -175,7 +268,16 @@ def convert_dataset(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    """Parse CLI arguments, resolve dataset paths, and convert ``.mtx`` files.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset, no dataset ``raw``
+            directory is found, or zero ``.mtx`` files exist across targets.
+        ValueError: If the explicit input path is invalid or stems collide.
+    """
+    parser = argparse.ArgumentParser(
+        description="Convert Matrix Market matrices to DIMACS .col graphs."
+    )
     parser.add_argument("input", nargs="?", type=Path, help="Matrix Market file or directory")
     parser.add_argument(
         "--remove-isolated", action="store_true",

@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-"""Select representative graphs with memory isolation and resumable processing."""
+"""Select representative graphs with memory isolation and resumable processing.
+
+Extracts 16 structural topological features from DIMACS ``.col`` graphs inside
+memory- and time-limited forked worker subprocesses, persists measurements and
+failure records in a resumable SQLite database, clusters standardized feature
+vectors using K-Means, synchronizes the selected ``.col`` files into ``--out``,
+and optionally exports a CSV report.
+
+Pipeline:
+    1. Discover top-level ``*.col`` files in ``--input-dir`` and optionally
+       skip edgeless graphs (``--skip-edgeless``).
+    2. Sort pending/modified/previously-failed files by ascending declared
+       vertex count and compute features in disposable ``fork`` workers capped
+       by ``RLIMIT_AS`` (``--memory-limit-mb``) and wall-clock ``--timeout-s``.
+    3. Persist each result immediately to SQLite (``features``, ``failures``,
+       and ``sources`` tables in WAL mode) using metadata fingerprints
+       ``(mtime_ns, size, bfs_samples, seed, feature_version=2)``.
+    4. Filter cached rows to currently present eligible inputs, standardize to
+       zero mean / unit variance, run K-Means, pick the graph closest to each
+       cluster centroid (with farthest-point fallback for empty clusters),
+       replace stale ``*.col`` files in ``--out``, and optionally save CSV.
+
+Platform & Environment:
+    * Requires Unix ``fork`` multiprocessing and ``resource.RLIMIT_AS``.
+    * Requires ``PROJECT_ROOT`` unless ``--db`` is supplied explicitly.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +47,8 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
 
+# Ordered list of the 16 structural topological features stored in SQLite,
+# clustered by K-Means, and exported to CSV.
 FEATURES = [
     "n_vertices",
     "n_edges",
@@ -41,6 +68,7 @@ FEATURES = [
     "approximate_average_path_length",
 ]
 
+# Subset of FEATURES formatted as exact integers (rather than 6-decimal floats) in CSV output.
 INTEGER_FEATURES = {
     "n_vertices",
     "n_edges",
@@ -51,14 +79,33 @@ INTEGER_FEATURES = {
 
 
 def format_feature_for_csv(feature: str, value: float) -> int | str:
-    """Keep counts as integers and format floats with six decimal places."""
+    """Format a feature value for CSV export.
+
+    Integer count features are emitted as ``int``; continuous features are
+    formatted to six decimal places.
+
+    Args:
+        feature: Feature name from :data:`FEATURES`.
+        value: Numeric feature measurement.
+
+    Returns:
+        Integer for count features or six-decimal string for continuous features.
+    """
     if feature in INTEGER_FEATURES:
         return int(value)
     return f"{float(value):.6f}"
 
 
 def read_dimacs_header(file_path: Path) -> tuple[int, int] | None:
-    """Read only `p edge n m` without loading the graph."""
+    """Read ``(n, m)`` from the first ``p`` header line without loading edges.
+
+    Args:
+        file_path: Path to a DIMACS ``.col`` file.
+
+    Returns:
+        Tuple ``(n_vertices, n_edges)`` if a valid ``p`` line is found;
+        otherwise ``None``.
+    """
     with file_path.open("r", encoding="utf-8", errors="replace") as file:
         for line in file:
             if line.startswith("p "):
@@ -73,7 +120,22 @@ def read_dimacs_header(file_path: Path) -> tuple[int, int] | None:
 
 
 def read_dimacs_col(file_path: Path) -> nx.Graph:
-    """Read a simple graph in DIMACS .col format."""
+    """Strictly parse a simple undirected graph from a DIMACS ``.col`` file.
+
+    Pre-populates vertices ``1..n`` from the header so isolated vertices are
+    preserved, and rejects missing/repeated headers, negative sizes, out-of-
+    range endpoints, self-loops, duplicate undirected edges, unknown records,
+    and edge-count mismatches.
+
+    Args:
+        file_path: Path to the DIMACS ``.col`` file.
+
+    Returns:
+        Parsed simple undirected ``nx.Graph`` with integer vertex IDs ``1..n``.
+
+    Raises:
+        ValueError: If the file violates the strict simple DIMACS ``.col`` format.
+    """
     graph = nx.Graph()
     vertex_count: int | None = None
     edge_count = 0
@@ -114,13 +176,30 @@ def read_dimacs_col(file_path: Path) -> nx.Graph:
 def approximate_diameter_and_path_length(
     graph: nx.Graph, sample_count: int, seed: int
 ) -> tuple[float, float]:
-    """Approximate diameter and average path length using BFS in the largest component."""
+    """Estimate diameter and average path length via sampled BFS.
+
+    Uses reservoir sampling with ``seed`` to select up to ``sample_count``
+    source vertices from the largest connected component, runs single-source
+    BFS from each source, and averages shortest-path lengths to all *other*
+    vertices (excluding self-distance 0).
+
+    Args:
+        graph: Simple undirected graph.
+        sample_count: Maximum number of BFS sources to sample.
+        seed: Random seed controlling reservoir sampling.
+
+    Returns:
+        Tuple ``(approximate_diameter, approximate_average_path_length)``, or
+        ``(0.0, 0.0)`` for an empty graph.
+    """
     if graph.number_of_nodes() == 0:
         return 0.0, 0.0
 
     largest_component = max(nx.connected_components(graph), key=len)
     subgraph = graph.subgraph(largest_component)
     rng = random.Random(seed)
+    # Algorithm R reservoir sampling over the largest connected component so we
+    # never materialize an extra list of all vertices in memory.
     samples: list[int] = []
     for index, vertex in enumerate(subgraph):
         if index < sample_count:
@@ -141,12 +220,21 @@ def approximate_diameter_and_path_length(
             distance_sum += distance
             count += 1
         eccentricities.append(maximum_distance)
+        # Divide by (count - 1) to exclude the trivial distance 0 from source to itself.
         average_path_lengths.append(distance_sum / (count - 1) if count > 1 else 0.0)
 
     return float(max(eccentricities)), float(np.mean(average_path_lengths))
 
 
 def degree_entropy(degrees: list[int]) -> float:
+    """Compute base-2 Shannon entropy of a vertex degree sequence.
+
+    Args:
+        degrees: List of vertex degrees.
+
+    Returns:
+        Shannon entropy in bits, or ``0.0`` when ``degrees`` is empty.
+    """
     if not degrees:
         return 0.0
     _, counts = np.unique(degrees, return_counts=True)
@@ -155,7 +243,16 @@ def degree_entropy(degrees: list[int]) -> float:
 
 
 def extract_features(graph: nx.Graph, bfs_samples: int, seed: int) -> dict[str, float]:
-    """Extract structural topological features from the graph."""
+    """Compute all 16 structural topological features for a graph.
+
+    Args:
+        graph: Simple undirected graph.
+        bfs_samples: Number of BFS source vertices for distance estimates.
+        seed: Random seed passed to :func:`approximate_diameter_and_path_length`.
+
+    Returns:
+        Dictionary mapping every name in :data:`FEATURES` to its numeric value.
+    """
     n = graph.number_of_nodes()
     m = graph.number_of_edges()
     degrees = [degree for _, degree in graph.degree()]
@@ -198,6 +295,11 @@ def extract_features(graph: nx.Graph, bfs_samples: int, seed: int) -> dict[str, 
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options for representative graph selection.
+
+    Returns:
+        Parsed CLI namespace.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Select representative DIMACS graphs by clustering "
@@ -254,6 +356,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_database_path(args: argparse.Namespace) -> Path:
+    """Resolve and prepare the parent directory of the SQLite feature cache.
+
+    Uses ``args.db`` when explicitly provided; otherwise resolves
+    ``$PROJECT_ROOT/datasets/<dataset_name>/features.sqlite3`` where
+    ``dataset_name`` defaults to ``args.db_name`` or ``args.input_dir.parent.name``.
+
+    Args:
+        args: Parsed CLI namespace.
+
+    Returns:
+        Path to the persistent SQLite database file.
+
+    Raises:
+        RuntimeError: If ``--db`` is omitted and ``PROJECT_ROOT`` is unset.
+    """
     if args.db is not None:
         args.db.parent.mkdir(parents=True, exist_ok=True)
         return args.db
@@ -270,7 +387,14 @@ def resolve_database_path(args: argparse.Namespace) -> Path:
 
 
 def has_vertices_and_edges(file_path: Path) -> bool:
-    """Check the DIMACS header for vertices and at least one edge."""
+    """Check whether a DIMACS header declares at least one vertex and one edge.
+
+    Args:
+        file_path: Path to a DIMACS ``.col`` file.
+
+    Returns:
+        ``True`` if the header declares ``n > 0`` and ``m > 0``; ``False`` otherwise.
+    """
     header = read_dimacs_header(file_path)
     return bool(header and header[0] > 0 and header[1] > 0)
 
@@ -282,6 +406,15 @@ def save_csv(
     clusters: np.ndarray,
     selected: list[int],
 ) -> None:
+    """Export features, cluster assignments, and selection flags to CSV.
+
+    Args:
+        file_path: Destination CSV path (parent directories created as needed).
+        names: Ordered list of graph filenames matching rows of ``matrix``.
+        matrix: 2D ``float64`` feature array of shape ``(len(names), len(FEATURES))``.
+        clusters: 1D array of K-Means cluster indices for each graph.
+        selected: Indices of graphs chosen as cluster representatives.
+    """
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
@@ -311,7 +444,19 @@ def _worker(
     limit_bytes: int,
     sender,
 ) -> None:
-    """Process a graph in a limited subprocess and return a small result."""
+    """Execute feature extraction in a memory-limited child process.
+
+    Applies ``resource.RLIMIT_AS`` when ``limit_bytes > 0`` (ignoring platform
+    errors), parses ``file_path``, computes features, and sends
+    ``(True, feature_dict)`` or ``(False, error_message)`` through ``sender``.
+
+    Args:
+        file_path: String path to the DIMACS ``.col`` file.
+        bfs_samples: Number of BFS samples for distance estimation.
+        seed: Random seed for BFS sampling.
+        limit_bytes: Virtual address space cap in bytes (``0`` disables).
+        sender: Write end of a multiprocessing ``Pipe``.
+    """
     try:
         if limit_bytes > 0:
             resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
@@ -336,7 +481,23 @@ def compute_features_in_subprocess(
     limit_bytes: int,
     timeout_s: float,
 ) -> tuple[bool, dict | str]:
-    """Run a disposable worker, surviving timeout, crash, or OOM."""
+    """Run :func:`_worker` in a forked subprocess with timeout and crash recovery.
+
+    Terminates (and after 5 seconds forcefully kills) workers exceeding
+    ``timeout_s`` and translates OOM kills or pipe ``EOFError`` into a structured
+    failure tuple.
+
+    Args:
+        file_path: Path to the DIMACS ``.col`` file.
+        bfs_samples: Number of BFS source vertices to sample.
+        seed: Random seed for BFS sampling.
+        limit_bytes: Virtual memory limit in bytes (``0`` disables).
+        timeout_s: Wall-clock timeout in seconds (``0`` disables).
+
+    Returns:
+        ``(True, features_dict)`` on success, or ``(False, reason_str)`` on
+        failure, timeout, or worker crash.
+    """
     context = mp.get_context("fork")
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(
@@ -371,6 +532,18 @@ def compute_features_in_subprocess(
 
 
 def prepare_database(db_path: Path) -> sqlite3.Connection:
+    """Open the SQLite feature cache, migrate legacy columns, and ensure schema.
+
+    Configures ``WAL`` journal mode and ``synchronous=NORMAL``, renames any
+    legacy Portuguese column names in ``features`` and ``failures`` to English,
+    and creates the ``features``, ``failures``, and ``sources`` tables if absent.
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        Open ``sqlite3.Connection`` ready for reads and writes.
+    """
     columns = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
     connection = sqlite3.connect(db_path)
     connection.execute("PRAGMA journal_mode=WAL")
@@ -423,7 +596,16 @@ def prepare_database(db_path: Path) -> sqlite3.Connection:
 
 
 def sort_by_size(files: list[Path]) -> list[Path]:
-    """Sort by declared vertex count without loading graphs."""
+    """Sort ``.col`` paths in ascending order of declared header vertex count.
+
+    Files without a parseable header default to vertex count ``0``.
+
+    Args:
+        files: List of DIMACS ``.col`` file paths.
+
+    Returns:
+        New list sorted from smallest to largest declared vertex count.
+    """
     return sorted(
         files,
         key=lambda file_path: (read_dimacs_header(file_path) or (0, 0))[0],
@@ -439,7 +621,22 @@ def compute_and_store_features(
     memory_limit_mb: int,
     timeout_s: float,
 ) -> None:
-    """Reuse unchanged successful features and recompute changed or failed files."""
+    """Extract and persist features for pending, modified, or previously failed files.
+
+    Reuses cached entries only when ``(mtime_ns, size, bfs_samples, seed, 2)``
+    matches the ``sources`` table joined with ``features``. Processes pending
+    graphs in ascending size order, committing each success or failure
+    immediately so interrupted runs can resume.
+
+    Args:
+        files: Candidate ``.col`` files to process.
+        bfs_samples: Number of BFS samples per graph.
+        seed: Random seed for BFS sampling.
+        db_path: Path to the persistent SQLite cache.
+        max_vertices: Maximum allowed declared vertex count (``0`` disables).
+        memory_limit_mb: Per-worker virtual memory cap in MiB (``0`` disables).
+        timeout_s: Per-worker timeout in seconds (``0`` disables).
+    """
     connection = prepare_database(db_path)
     cached_sources = {
         record[0]: tuple(record[1:])
@@ -508,7 +705,16 @@ def compute_and_store_features(
 def load_features(
     database_path: Path,
 ) -> tuple[list[str], np.ndarray, list[tuple[str, str]]]:
-    """Load only successful records for k-means."""
+    """Load cached feature vectors and failure summaries from SQLite.
+
+    Args:
+        database_path: Path to the SQLite feature database.
+
+    Returns:
+        Tuple ``(names, matrix, failures)`` containing sorted filenames, a 2D
+        ``float64`` feature array matching :data:`FEATURES`, and ``(file, reason)``
+        failure pairs.
+    """
     columns = ", ".join(f'"{feature}"' for feature in FEATURES)
     with closing(prepare_database(database_path)) as connection:
         records = connection.execute(
@@ -523,6 +729,23 @@ def load_features(
 
 
 def main() -> None:
+    """Run feature extraction, K-Means representative selection, and file export.
+
+    Validates CLI parameters, optionally updates the SQLite feature cache,
+    filters cached rows to currently present eligible inputs, clusters
+    standardized feature vectors with K-Means (with farthest-point fallback for
+    empty clusters), synchronizes ``*.col`` files in ``--out``, and optionally
+    writes a CSV report.
+
+    Raises:
+        ValueError: If CLI options are out of range, ``--input-dir`` equals
+            ``--out``, or fewer than ``--n`` eligible graphs exist without
+            ``--use-all-if-fewer``.
+        FileNotFoundError: If no ``.col`` files exist in ``--input-dir`` or the
+            database is missing under ``--only-select``.
+        RuntimeError: If ``PROJECT_ROOT`` is needed but unset, or zero eligible
+            graphs were processed successfully.
+    """
     args = parse_args()
     if args.n < 1:
         raise ValueError("n must be at least 1")
@@ -608,6 +831,8 @@ def main() -> None:
         selected.append(int(indices[np.argmin(distances)]))
 
     if len(selected) < target_count:
+        # Empty K-Means clusters can leave fewer representatives than requested;
+        # fill remaining slots with points farthest from the chosen set.
         remaining = [
             index for index in range(len(names)) if index not in selected
         ]

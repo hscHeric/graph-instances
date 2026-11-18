@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
-"""Download edge-list graphs from the Stanford SNAP collection."""
+"""Download edge-list graphs from the Stanford SNAP collection.
+
+Streams configured SNAP archives into ``$PROJECT_ROOT/datasets/snap/raw/.downloads/``
+in parallel (1 MiB chunks, 300-second timeout), extracts ``.tar.gz``, ``.zip``,
+and ``.gz`` archives sequentially, writes completion markers under
+``.completed/`` (while honoring legacy ``.concluidos/`` markers), and flattens
+extracted files into ``datasets/snap/raw/`` while discarding ``readme*`` and
+macOS ``._*`` files.
+
+Environment Variables:
+    PROJECT_ROOT: Required path to the repository root containing ``datasets/``.
+    SNAP_DOWNLOAD_WORKERS: Optional positive integer controlling concurrent
+        downloads (default: number of selected URLs).
+
+CLI Options:
+    --include-friendster: Append the exceptionally large ``com-Friendster``
+        archive to the download catalog.
+
+Notes:
+    * All pending archives are downloaded before extraction begins, so peak
+      disk usage includes both staged archives and extracted outputs.
+    * Filename collisions during flattening are disambiguated with parent
+      directory prefixes and numeric suffixes, which may alter special
+      filenames expected by ``scripts/convert/snap.py``.
+"""
 
 from __future__ import annotations
 
@@ -59,6 +83,7 @@ ROOT_FILES = [
     "wikipedia.zip",
 ]
 
+# Full default URL catalog (root archives, bigdata community graphs, and Wikispeedia).
 SNAP_URLS = [f"{BASE_URL}/{name}" for name in ROOT_FILES]
 SNAP_URLS += [
     f"{BASE_URL}/bigdata/communities/{name}"
@@ -73,10 +98,16 @@ SNAP_URLS += [
 SNAP_URLS.append(
     f"{BASE_URL}/wikispeedia/wikispeedia_paths-and-graph.tar.gz"
 )
+# Opt-in URL excluded by default due to its multi-gigabyte archive and edge count.
 FRIENDSTER_URL = f"{BASE_URL}/bigdata/communities/com-friendster.ungraph.txt.gz"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line options for the SNAP downloader.
+
+    Returns:
+        Parsed namespace containing ``include_friendster``.
+    """
     parser = argparse.ArgumentParser(
         description="Download and extract graphs from the Stanford SNAP collection."
     )
@@ -89,7 +120,23 @@ def parse_args() -> argparse.Namespace:
 
 
 def download_file(url: str, destination: Path) -> tuple[str, Path | None]:
-    """Stream a file download and allow the task to resume."""
+    """Stream a single SNAP archive to staging unless marked complete.
+
+    Checks ``.completed/<name>`` and legacy ``.concluidos/<name>`` before
+    downloading in 1 MiB chunks to ``.downloads/<name>``.
+
+    Args:
+        url: Remote SNAP archive URL.
+        destination: Raw SNAP directory (``datasets/snap/raw``).
+
+    Returns:
+        Tuple ``(status, staged_path)``, where ``status`` is ``"ALREADY EXISTS"``
+        with ``None`` or ``"OK"`` with the path to the downloaded file.
+
+    Raises:
+        requests.RequestException: If the HTTP request fails or times out.
+        OSError: If writing the staged archive fails.
+    """
     name = Path(urlparse(url).path).name
     marker = destination / ".completed" / name
     if marker.exists() or (destination / ".concluidos" / name).exists():
@@ -109,7 +156,28 @@ def download_file(url: str, destination: Path) -> tuple[str, Path | None]:
 
 
 def extract_file(name: str, source: Path, destination: Path) -> int:
-    """Extract a downloaded file and return the number of files produced."""
+    """Extract or move a staged archive and write its completion marker.
+
+    Supports ``.tar.gz`` (using ``filter="data"``), ``.zip``, ``.gz`` (atomically
+    published via a temporary ``.extracted`` file), and uncompressed files.
+    Deletes ``source`` upon successful extraction and creates
+    ``.completed/<name>``.
+
+    Args:
+        name: Original archive filename derived from its URL.
+        source: Path to the staged archive inside ``.downloads/``.
+        destination: Raw SNAP directory receiving extracted contents.
+
+    Returns:
+        ``1`` upon successful archive extraction or move.
+
+    Raises:
+        OSError: If reading, writing, or moving files fails.
+        EOFError: If a compressed stream terminates unexpectedly.
+        gzip.BadGzipFile: If a ``.gz`` archive is invalid.
+        tarfile.TarError: If a ``.tar.gz`` archive is invalid or blocked.
+        zipfile.BadZipFile: If a ``.zip`` archive is invalid.
+    """
     if name.endswith(".tar.gz"):
         with tarfile.open(source, "r:gz") as file:
             file.extractall(destination, filter="data")
@@ -138,7 +206,19 @@ def extract_file(name: str, source: Path, destination: Path) -> int:
 
 
 def move_files_to_root(destination: Path) -> tuple[int, int]:
-    """Move files from subdirectories to raw and discard readme files."""
+    """Flatten extracted files into the raw directory and discard auxiliary files.
+
+    Skips internal bookkeeping directories (``.downloads``, ``.completed``,
+    ``.concluidos``), deletes ``readme*`` and macOS ``._*`` files, resolves
+    filename collisions by prefixing relative parent directory segments and
+    appending numeric suffixes, and prunes empty subdirectories.
+
+    Args:
+        destination: Raw SNAP directory.
+
+    Returns:
+        Tuple ``(moved, discarded)`` reporting moved and deleted file counts.
+    """
     moved = 0
     discarded = 0
 
@@ -195,6 +275,17 @@ def move_files_to_root(destination: Path) -> tuple[int, int]:
 
 
 def main() -> None:
+    """Download, extract, and flatten the configured SNAP dataset collection.
+
+    Reads ``PROJECT_ROOT`` (required) and ``SNAP_DOWNLOAD_WORKERS`` (optional
+    positive integer, default equal to the number of selected URLs) from the
+    environment.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset.
+        ValueError: If ``SNAP_DOWNLOAD_WORKERS`` is not a positive integer.
+        SystemExit: Exits with status ``1`` if any download or extraction fails.
+    """
     args = parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:

@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Download the DIMACS collection hosted by Network Repository."""
+"""Download the DIMACS collection hosted by Network Repository.
+
+Fetches the 78 configured DIMACS clique/coloring benchmark archives in parallel
+with a 60-second per-request timeout, verifies ZIP magic bytes in memory before
+extraction, flattens extracted files into ``$PROJECT_ROOT/datasets/dimacs/raw/``,
+discards ``readme*`` files, and prunes empty staging directories.
+
+Environment Variables:
+    PROJECT_ROOT: Required path to the repository root containing ``datasets/``.
+    DIMACS_DOWNLOAD_WORKERS: Optional positive integer controlling thread pool
+        concurrency (default: ``78``).
+
+Notes:
+    * Reruns re-download archives (no completion markers or HTTP Range resume);
+      byte-identical files already at the raw root are deduplicated during
+      flattening, while conflicting filenames raise ``FileExistsError``.
+    * Downloaded Matrix Market files still require conversion via
+      ``scripts/convert/matrix_market.py`` to produce DIMACS ``.col`` files.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +33,7 @@ from shutil import move
 import requests
 
 
+# Checked-in catalog of 78 DIMACS benchmark instances hosted on Network Repository.
 DIMACS_INSTANCES = [
     "C1000-9", "C125-9", "C2000-5", "C2000-9", "C250-9", "C4000-5", "C500-9",
     "DSJC1000-5", "DSJC500-5",
@@ -41,6 +60,7 @@ DIMACS_INSTANCES = [
     "sanr200-0-7", "sanr200-0-9", "sanr400-0-5", "sanr400-0-7",
 ]
 
+# Base URL and browser-like User-Agent expected by nrvis.com.
 BASE_URL = "https://nrvis.com/download/data/dimacs"
 HEADERS = {
     "User-Agent": (
@@ -51,7 +71,24 @@ HEADERS = {
 
 
 def try_download(url: str, destination: Path) -> bool:
-    """Download and extract a valid ZIP into the destination directory."""
+    """Download and extract a valid ZIP archive into a destination directory.
+
+    Validates that the HTTP response returns status 200 and starts with the
+    ZIP magic bytes (``PK``) before extracting in memory.
+
+    Args:
+        url: Remote ZIP archive URL.
+        destination: Directory where archive members are extracted.
+
+    Returns:
+        ``True`` if the response was a valid ZIP and extraction succeeded;
+        ``False`` if the response status was not 200 or lacked a ZIP header.
+
+    Raises:
+        requests.RequestException: If the HTTP request fails or times out.
+        zipfile.BadZipFile: If the payload starts with ``PK`` but is corrupt.
+        OSError: If writing extracted files fails.
+    """
     response = requests.get(url, headers=HEADERS, timeout=60)
     if response.status_code != 200 or not response.content.startswith(b"PK"):
         return False
@@ -62,7 +99,20 @@ def try_download(url: str, destination: Path) -> bool:
 
 
 def download_and_extract(name: str, destination: Path) -> bool:
-    """Try downloading an instance using different capitalizations."""
+    """Try downloading a DIMACS instance using candidate capitalizations.
+
+    Attempts the original, lowercase, and uppercase archive names (deduplicated
+    in order) and extracts the first successful archive into
+    ``<destination>/.downloads/<name>/``.
+
+    Args:
+        name: Configured DIMACS instance name.
+        destination: Raw dataset root directory.
+
+    Returns:
+        ``True`` if any capitalization variant downloaded and extracted
+        successfully; ``False`` otherwise.
+    """
     instance_destination = destination / ".downloads" / name
     instance_destination.mkdir(parents=True, exist_ok=True)
     candidates = list(dict.fromkeys((name, name.lower(), name.upper())))
@@ -79,7 +129,22 @@ def download_and_extract(name: str, destination: Path) -> bool:
 
 
 def move_files_to_root(destination: Path) -> int:
-    """Discard readmes and move other files to the raw directory root."""
+    """Flatten extracted files into the raw directory root and discard readmes.
+
+    Deletes files whose lowercase name starts with ``readme``, removes
+    byte-identical duplicates already present at the root, raises on
+    conflicting filenames, and prunes empty subdirectories.
+
+    Args:
+        destination: Raw dataset root directory containing staged downloads.
+
+    Returns:
+        Number of files moved into ``destination``.
+
+    Raises:
+        FileExistsError: If a flattened file collides with an existing file
+            whose contents differ.
+    """
     moved_files = 0
     for source in destination.rglob("*"):
         if source.is_dir():
@@ -118,7 +183,20 @@ def move_files_to_root(destination: Path) -> int:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()
+    """Download all configured DIMACS instances and flatten extracted files.
+
+    Reads ``PROJECT_ROOT`` (required) and ``DIMACS_DOWNLOAD_WORKERS`` (optional
+    positive integer, default ``78``) from the environment.
+
+    Raises:
+        RuntimeError: If ``PROJECT_ROOT`` is unset.
+        ValueError: If ``DIMACS_DOWNLOAD_WORKERS`` is not a positive integer.
+        FileExistsError: If flattening encounters conflicting filenames.
+        SystemExit: Exits with status ``1`` if one or more instances fail.
+    """
+    argparse.ArgumentParser(
+        description="Download the DIMACS collection hosted by Network Repository."
+    ).parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
