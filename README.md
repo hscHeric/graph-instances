@@ -202,11 +202,15 @@ To also save a table of features and selected graphs:
 python graph_instances.py select snap --count 20 --csv datasets/snap/selection.csv
 ```
 
-Feature calculations are cached for later runs. Selection is more expensive
-than filtering: it uses NetworkX and, by default, skips graphs above 500,000
-vertices. Its defaults also limit each worker to 4,096 MB and six hours.
-See [selection options](docs/reference.md#representative-selection) before
-changing these limits for large SNAP graphs.
+Feature calculations are cached for later runs. Selection loads graphs into
+compact NumPy/SciPy CSR arrays, computes exact clustering/transitivity up to
+200,000 edges (switching to unbiased Monte Carlo sampling above that limit),
+applies `log1p` scaling to heavy-tailed size/degree features before clustering,
+and by default skips graphs above 5,000,000 vertices. For SNAP, it also caps
+repetitive temporal snapshot series (`--max-per-series 2`). Its defaults limit
+each worker to 4,096 MB and six hours. See
+[selection options](docs/reference.md#representative-selection) before changing
+these limits for extreme graphs such as Friendster.
 
 ## Use mise shortcuts
 

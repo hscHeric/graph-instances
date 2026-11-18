@@ -112,7 +112,7 @@ run = "python scripts/select/representative_selection.py --input-dir datasets/bh
 
 [tasks."select::snap"]
 description = "Select representative SNAP graphs"
-run = "python scripts/select/representative_selection.py --input-dir datasets/snap/processed --out datasets/snap/selected --db-name snap --n 20 --skip-edgeless --use-all-if-fewer"
+run = "python scripts/select/representative_selection.py --input-dir datasets/snap/processed --out datasets/snap/selected --db-name snap --n 20 --skip-edgeless --max-per-series 2 --use-all-if-fewer"
 
 [tasks."select::erdos_renyi"]
 description = "Select representative Erdos-Renyi graphs"

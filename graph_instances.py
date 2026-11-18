@@ -163,7 +163,7 @@ def main() -> None:
                 "--db-name", name, "--count", str(SELECTION_SIZES[target]), "--use-all-if-fewer",
             ]
             if name == "snap":
-                defaults.append("--skip-edgeless")
+                defaults.extend(["--skip-edgeless", "--max-per-series", "2"])
             run("scripts/select/representative_selection.py", [*defaults, *options])
 
 

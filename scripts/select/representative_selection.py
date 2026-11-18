@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Select representative graphs with memory isolation and resumable processing.
 
-Extracts 16 structural topological features from DIMACS ``.col`` graphs inside
+Extracts 16 structural topological features from DIMACS ``.col`` graphs using a
+compact Compressed Sparse Row (CSR) representation in NumPy/SciPy inside
 memory- and time-limited forked worker subprocesses, persists measurements and
 failure records in a resumable SQLite database, clusters standardized feature
 vectors using K-Means, synchronizes the selected ``.col`` files into ``--out``,
@@ -13,13 +14,25 @@ Pipeline:
     2. Sort pending/modified/previously-failed files by ascending declared
        vertex count and compute features in disposable ``fork`` workers capped
        by ``RLIMIT_AS`` (``--memory-limit-mb``) and wall-clock ``--timeout-s``.
+       * Small/medium graphs (``m <= --exact-triangle-edges``) compute exact
+         ``mean_clustering`` and ``transitivity`` in a single degree-oriented
+         Chiba-Nishizeki pass.
+       * Larger graphs use unbiased deterministic wedge sampling (Seshadhri
+         et al.) for ``transitivity`` and uniform eligible-vertex neighbor-pair
+         sampling for ``mean_clustering``, avoiding quadratic hub blowup while
+         keeping full-graph coverage across millions of vertices and edges.
     3. Persist each result immediately to SQLite (``features``, ``failures``,
        and ``sources`` tables in WAL mode) using metadata fingerprints
-       ``(mtime_ns, size, bfs_samples, seed, feature_version=2)``.
-    4. Filter cached rows to currently present eligible inputs, standardize to
-       zero mean / unit variance, run K-Means, pick the graph closest to each
-       cluster centroid (with farthest-point fallback for empty clusters),
-       replace stale ``*.col`` files in ``--out``, and optionally save CSV.
+       ``(mtime_ns, size, bfs_samples, seed, feature_version=3,
+       exact_triangle_edges, triangle_samples)``. The SQLite connection is
+       always closed before forking worker processes.
+    4. Filter cached rows to currently present eligible inputs, optionally cap
+       repetitive temporal snapshot series (``--max-per-series``) via within-
+       series representative selection so snapshot floods do not dominate
+       clustering, apply ``log1p`` to heavy-tailed scale features (unless
+       ``--no-log-scale`` is set), standardize, run K-Means with farthest-first
+       empty-cluster fallback, synchronize ``*.col`` files in ``--out``, and
+       optionally save CSV.
 
 Platform & Environment:
     * Requires Unix ``fork`` multiprocessing and ``resource.RLIMIT_AS``.
@@ -31,21 +44,34 @@ from __future__ import annotations
 import argparse
 import csv
 from contextlib import closing
+from dataclasses import dataclass
 import math
 import multiprocessing as mp
 import os
 import random
+import re
 import resource
 import shutil
 import sqlite3
-import warnings
+import time
 from pathlib import Path
 
-import networkx as nx
+# Limit BLAS/OpenMP thread pools before importing NumPy/SciPy/scikit-learn so
+# forked workers do not reserve excessive virtual address space under RLIMIT_AS.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import numpy as np
+import scipy.sparse
+from scipy.sparse.csgraph import connected_components, shortest_path
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
+
+# Cache schema version; increment whenever feature computation semantics change.
+FEATURE_VERSION = 3
 
 # Ordered list of the 16 structural topological features stored in SQLite,
 # clustered by K-Means, and exported to CSV.
@@ -77,12 +103,62 @@ INTEGER_FEATURES = {
     "component_count",
 }
 
+# Non-negative heavy-tailed scale features transformed via log1p before
+# StandardScaler so multi-order-of-magnitude graphs cluster evenly.
+LOG_SCALED_FEATURE_INDICES = tuple(
+    index
+    for index, name in enumerate(FEATURES)
+    if name in {
+        "n_vertices",
+        "n_edges",
+        "minimum_degree",
+        "maximum_degree",
+        "mean_degree",
+        "median_degree",
+        "degree_std",
+        "component_count",
+        "approximate_diameter",
+        "approximate_average_path_length",
+    }
+)
+
+# Known multi-snapshot temporal series patterns (stem regex -> canonical series ID).
+# Used when --max-per-series > 0 to prevent hundreds of near-identical snapshots
+# (e.g. SNAP as-733 or as-caida) from dominating feature standardization and K-Means.
+TEMPORAL_SERIES_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^as\d{8}$", re.IGNORECASE), "as-733"),
+    (re.compile(r"^as-caida\d{8}$", re.IGNORECASE), "as-caida"),
+    (re.compile(r"^oregon1_\d{6}$", re.IGNORECASE), "oregon1"),
+    (re.compile(r"^oregon2_\d{6}$", re.IGNORECASE), "oregon2"),
+    (re.compile(r"^network\d+$", re.IGNORECASE), "comm-f2f-resistance"),
+)
+
+# Maximum characters transmitted back from a worker on exception to prevent
+# exceeding OS pipe buffers during error reporting.
+MAX_ERROR_MESSAGE_CHARS = 2048
+
+
+@dataclass(slots=True)
+class CSRGraph:
+    """Compact undirected simple graph stored in Compressed Sparse Row format.
+
+    Attributes:
+        n_vertices: Number of vertices (0-based internally, representing 1..n).
+        n_edges: Number of undirected simple edges.
+        matrix: Symmetric binary ``scipy.sparse.csr_matrix`` with sorted
+            indices and zero diagonal.
+    """
+
+    n_vertices: int
+    n_edges: int
+    matrix: scipy.sparse.csr_matrix
+
 
 def format_feature_for_csv(feature: str, value: float) -> int | str:
     """Format a feature value for CSV export.
 
     Integer count features are emitted as ``int``; continuous features are
-    formatted to six decimal places.
+    formatted to six decimal places (normalizing ``-0.0`` to ``0.0``).
 
     Args:
         feature: Feature name from :data:`FEATURES`.
@@ -93,115 +169,351 @@ def format_feature_for_csv(feature: str, value: float) -> int | str:
     """
     if feature in INTEGER_FEATURES:
         return int(value)
-    return f"{float(value):.6f}"
+    numeric = float(value)
+    if numeric == 0.0:
+        numeric = 0.0
+    return f"{numeric:.6f}"
 
 
 def read_dimacs_header(file_path: Path) -> tuple[int, int] | None:
-    """Read ``(n, m)`` from the first ``p`` header line without loading edges.
+    """Read ``(n, m)`` from the first valid ``p edge n m`` header line.
+
+    Scans line by line without loading edges, skipping blank lines and ``c``
+    comments.
 
     Args:
         file_path: Path to a DIMACS ``.col`` file.
 
     Returns:
-        Tuple ``(n_vertices, n_edges)`` if a valid ``p`` line is found;
-        otherwise ``None``.
+        Tuple ``(n_vertices, n_edges)`` if a valid non-negative ``p edge n m``
+        header is found; otherwise ``None``.
     """
     with file_path.open("r", encoding="utf-8", errors="replace") as file:
         for line in file:
-            if line.startswith("p "):
-                parts = line.split()
-                if len(parts) < 4:
+            parts = line.strip().split()
+            if not parts or parts[0] == "c":
+                continue
+            if parts[0] == "p":
+                if len(parts) != 4 or parts[1] != "edge":
                     return None
                 try:
-                    return int(parts[2]), int(parts[3])
+                    n_vertices, n_edges = int(parts[2]), int(parts[3])
                 except ValueError:
                     return None
+                if n_vertices < 0 or n_edges < 0:
+                    return None
+                return n_vertices, n_edges
+            return None
     return None
 
 
-def read_dimacs_col(file_path: Path) -> nx.Graph:
-    """Strictly parse a simple undirected graph from a DIMACS ``.col`` file.
+def read_dimacs_col(file_path: Path) -> CSRGraph:
+    """Strictly parse a simple undirected DIMACS ``.col`` file into CSR format.
 
-    Pre-populates vertices ``1..n`` from the header so isolated vertices are
-    preserved, and rejects missing/repeated headers, negative sizes, out-of-
-    range endpoints, self-loops, duplicate undirected edges, unknown records,
-    and edge-count mismatches.
+    Validates single ``p edge n m`` header, non-negative counts, valid ``1..n``
+    endpoint bounds, absence of self-loops, absence of duplicate undirected
+    edges, known record prefixes, and exact edge-line count match, while using
+    compact NumPy/SciPy arrays (~8–24 bytes per undirected edge).
 
     Args:
         file_path: Path to the DIMACS ``.col`` file.
 
     Returns:
-        Parsed simple undirected ``nx.Graph`` with integer vertex IDs ``1..n``.
+        Validated :class:`CSRGraph` with sorted neighbor lists and zero diagonal.
 
     Raises:
         ValueError: If the file violates the strict simple DIMACS ``.col`` format.
     """
-    graph = nx.Graph()
     vertex_count: int | None = None
-    edge_count = 0
+    expected_edges = 0
+    edge_index = 0
+    u_arr: np.ndarray | None = None
+    v_arr: np.ndarray | None = None
+
     with file_path.open("r", encoding="utf-8", errors="replace") as file:
         for line_number, line in enumerate(file, start=1):
             text = line.strip()
-            if not text or text.split()[0] == "c":
+            if not text:
                 continue
             parts = text.split()
+            record = parts[0]
+            if record == "c":
+                continue
             try:
-                if parts[0] == "p":
+                if record == "p":
                     if vertex_count is not None or len(parts) != 4 or parts[1] != "edge":
                         raise ValueError("expected one 'p edge n m' header")
-                    vertex_count, edge_count = map(int, parts[2:])
-                    if vertex_count < 0 or edge_count < 0:
+                    vertex_count, expected_edges = map(int, parts[2:])
+                    if vertex_count < 0 or expected_edges < 0:
                         raise ValueError("negative graph size")
-                    graph.add_nodes_from(range(1, vertex_count + 1))
-                elif parts[0] == "e":
-                    if vertex_count is None or len(parts) != 3:
+                    u_arr = np.empty(expected_edges, dtype=np.int32)
+                    v_arr = np.empty(expected_edges, dtype=np.int32)
+                elif record == "e":
+                    if vertex_count is None or u_arr is None or v_arr is None or len(parts) != 3:
                         raise ValueError("edge before header or malformed edge")
-                    u, v = map(int, parts[1:])
+                    u, v = int(parts[1]), int(parts[2])
                     if not (1 <= u <= vertex_count and 1 <= v <= vertex_count):
                         raise ValueError("vertex ID outside 1..n")
-                    if u == v or graph.has_edge(u, v):
-                        raise ValueError("loop or duplicate undirected edge")
-                    graph.add_edge(u, v)
+                    if u == v:
+                        raise ValueError("self-loop edge")
+                    if edge_index >= expected_edges:
+                        raise ValueError("edge count exceeds header")
+                    u_arr[edge_index] = u - 1
+                    v_arr[edge_index] = v - 1
+                    edge_index += 1
                 else:
                     raise ValueError("unknown DIMACS record")
-            except (IndexError, ValueError) as error:
+            except ValueError as error:
+                snippet = text[:200]
                 raise ValueError(
-                    f"invalid DIMACS line at {file_path}:{line_number}: {text}"
+                    f"invalid DIMACS line at {file_path}:{line_number}: {snippet}"
                 ) from error
-    if vertex_count is None or graph.number_of_edges() != edge_count:
+
+    if vertex_count is None or u_arr is None or v_arr is None or edge_index != expected_edges:
         raise ValueError(f"{file_path}: missing header or edge count mismatch")
-    return graph
+
+    if expected_edges == 0:
+        matrix = scipy.sparse.csr_matrix((vertex_count, vertex_count), dtype=np.int8)
+        return CSRGraph(n_vertices=vertex_count, n_edges=0, matrix=matrix)
+
+    # Build a symmetric CSR matrix from both edge directions. Any duplicate
+    # undirected edge merges during sum_duplicates(), strictly reducing nnz.
+    rows = np.concatenate((u_arr, v_arr))
+    cols = np.concatenate((v_arr, u_arr))
+    del u_arr, v_arr
+    data = np.ones(rows.size, dtype=np.int8)
+    matrix = scipy.sparse.coo_matrix(
+        (data, (rows, cols)), shape=(vertex_count, vertex_count)
+    ).tocsr()
+    del rows, cols, data
+    matrix.sum_duplicates()
+    if matrix.nnz != 2 * expected_edges:
+        raise ValueError(f"{file_path}: duplicate undirected edge")
+    matrix.sort_indices()
+    return CSRGraph(n_vertices=vertex_count, n_edges=expected_edges, matrix=matrix)
+
+
+def _has_edge(indptr: np.ndarray, indices: np.ndarray, u: int, v: int) -> bool:
+    """Check edge membership in a sorted CSR graph via binary search.
+
+    Always searches the shorter of the two adjacency lists in
+    ``O(log min(deg(u), deg(v)))`` time.
+
+    Args:
+        indptr: CSR row pointer array.
+        indices: Sorted CSR column index array.
+        u: First 0-based vertex ID.
+        v: Second 0-based vertex ID.
+
+    Returns:
+        ``True`` if ``(u, v)`` is present; ``False`` otherwise.
+    """
+    start_u, end_u = int(indptr[u]), int(indptr[u + 1])
+    start_v, end_v = int(indptr[v]), int(indptr[v + 1])
+    if (end_u - start_u) <= (end_v - start_v):
+        neighbors = indices[start_u:end_u]
+        target = v
+    else:
+        neighbors = indices[start_v:end_v]
+        target = u
+    position = int(np.searchsorted(neighbors, target))
+    return position < neighbors.size and int(neighbors[position]) == target
+
+
+def _exact_clustering_and_transitivity(
+    indptr: np.ndarray, indices: np.ndarray, degrees: np.ndarray
+) -> tuple[float, float]:
+    """Compute exact ``mean_clustering`` and ``transitivity`` in one pass.
+
+    Uses degree-oriented (Chiba-Nishizeki) triangle enumeration so each
+    triangle ``{a, b, c}`` is discovered exactly once in strict
+    ``(degree, vertex_id)`` order via C-speed Python set intersections.
+
+    Args:
+        indptr: CSR row pointer array.
+        indices: Sorted CSR column index array.
+        degrees: 1D ``int64`` vertex degree array of length ``n``.
+
+    Returns:
+        Tuple ``(mean_clustering, transitivity)``.
+    """
+    n = degrees.size
+    if n == 0:
+        return 0.0, 0.0
+    wedges_per_node = degrees * (degrees - 1) // 2
+    total_wedges = int(wedges_per_node.sum())
+    if total_wedges == 0:
+        return 0.0, 0.0
+
+    # Orient each edge from lower to higher (degree, id); degree < 2 nodes
+    # cannot participate in any triangle.
+    adj_plus: list[set[int]] = [set() for _ in range(n)]
+    for u in range(n):
+        deg_u = int(degrees[u])
+        if deg_u < 2:
+            continue
+        start, end = int(indptr[u]), int(indptr[u + 1])
+        out = adj_plus[u]
+        for v in indices[start:end].tolist():
+            deg_v = int(degrees[v])
+            if deg_v > deg_u or (deg_v == deg_u and v > u):
+                out.add(v)
+
+    triangles = np.zeros(n, dtype=np.int64)
+    for u, su in enumerate(adj_plus):
+        if len(su) < 2:
+            continue
+        for v in su:
+            common = su & adj_plus[v]
+            count = len(common)
+            if count:
+                triangles[u] += count
+                triangles[v] += count
+                for w in common:
+                    triangles[w] += 1
+
+    transitivity = float(triangles.sum()) / float(total_wedges)
+    clustering = np.zeros(n, dtype=np.float64)
+    mask = wedges_per_node > 0
+    clustering[mask] = triangles[mask] / wedges_per_node[mask]
+    return float(clustering.mean()), transitivity
+
+
+def _sampled_clustering_and_transitivity(
+    indptr: np.ndarray,
+    indices: np.ndarray,
+    degrees: np.ndarray,
+    sample_count: int,
+    seed: int,
+) -> tuple[float, float]:
+    """Estimate ``mean_clustering`` and ``transitivity`` via unbiased sampling.
+
+    * ``transitivity`` uses wedge sampling (Seshadhri et al.): center vertices
+      are sampled with exact probability proportional to ``d(v) * (d(v) - 1) / 2``
+      and two distinct neighbors are tested for edge closure in ``O(log d)``.
+    * ``mean_clustering`` samples eligible vertices (``d(v) >= 2``) uniformly,
+      tests one uniform random neighbor pair per draw, and scales by
+      ``|eligible| / n``; by the law of total expectation this estimator is
+      strictly unbiased and immune to high-degree hubs.
+
+    Args:
+        indptr: CSR row pointer array.
+        indices: Sorted CSR column index array.
+        degrees: 1D ``int64`` vertex degree array of length ``n``.
+        sample_count: Number of Monte Carlo samples for each estimator.
+        seed: Deterministic random seed for NumPy's ``default_rng``.
+
+    Returns:
+        Tuple ``(estimated_mean_clustering, estimated_transitivity)``.
+    """
+    n = degrees.size
+    if n == 0:
+        return 0.0, 0.0
+    wedges_per_node = degrees * (degrees - 1) // 2
+    total_wedges = int(wedges_per_node.sum())
+    if total_wedges == 0:
+        return 0.0, 0.0
+
+    rng = np.random.default_rng(seed)
+
+    # 1. Exact integer inverse-CDF wedge sampling for global transitivity.
+    cdf = np.cumsum(wedges_per_node)
+    wedge_draws = rng.integers(0, total_wedges, size=sample_count)
+    centers = np.searchsorted(cdf, wedge_draws, side="right")
+    closed_wedges = 0
+    for c in centers.tolist():
+        deg_c = int(degrees[c])
+        i = int(rng.integers(0, deg_c))
+        j = int(rng.integers(0, deg_c - 1))
+        if j >= i:
+            j += 1
+        base = int(indptr[c])
+        if _has_edge(indptr, indices, int(indices[base + i]), int(indices[base + j])):
+            closed_wedges += 1
+    transitivity = closed_wedges / sample_count
+
+    # 2. Unbiased mean local clustering via uniform eligible vertex + pair sampling.
+    eligible = np.flatnonzero(degrees >= 2)
+    chosen_vertices = eligible[rng.integers(0, eligible.size, size=sample_count)]
+    closed_pairs = 0
+    for c in chosen_vertices.tolist():
+        deg_c = int(degrees[c])
+        i = int(rng.integers(0, deg_c))
+        j = int(rng.integers(0, deg_c - 1))
+        if j >= i:
+            j += 1
+        base = int(indptr[c])
+        if _has_edge(indptr, indices, int(indices[base + i]), int(indices[base + j])):
+            closed_pairs += 1
+    mean_clustering = (eligible.size / n) * (closed_pairs / sample_count)
+
+    return float(mean_clustering), float(transitivity)
+
+
+def degree_assortativity(
+    matrix: scipy.sparse.csr_matrix, degrees: np.ndarray, n_edges: int
+) -> float:
+    """Compute exact Newman degree assortativity coefficient on a CSR graph.
+
+    Uses the centered quadratic form ``(dc^T A dc) / sum_u (d_u * dc_u^2)``
+    where ``dc_u = d_u - mu`` and ``mu = sum(d_u^2) / (2m)``, matching
+    ``networkx.degree_assortativity_coefficient`` in ``O(n + m)`` time and
+    ``O(n)`` auxiliary memory.
+
+    Args:
+        matrix: Symmetric binary CSR adjacency matrix with zero diagonal.
+        degrees: 1D ``int64`` vertex degree array.
+        n_edges: Number of undirected edges.
+
+    Returns:
+        Degree assortativity in ``[-1.0, 1.0]``, or ``0.0`` when undefined
+        (e.g., edgeless or regular graphs).
+    """
+    if n_edges == 0:
+        return 0.0
+    deg_float = degrees.astype(np.float64)
+    mean_endpoint_degree = float(np.dot(deg_float, deg_float) / (2.0 * n_edges))
+    centered = deg_float - mean_endpoint_degree
+    denominator = float(np.dot(deg_float, centered * centered))
+    if denominator <= 0.0:
+        return 0.0
+    numerator = float(np.dot(centered, matrix @ centered))
+    value = numerator / denominator
+    if not math.isfinite(value):
+        return 0.0
+    return float(max(-1.0, min(1.0, value)))
 
 
 def approximate_diameter_and_path_length(
-    graph: nx.Graph, sample_count: int, seed: int
+    matrix: scipy.sparse.csr_matrix,
+    largest_component_nodes: np.ndarray,
+    sample_count: int,
+    seed: int,
 ) -> tuple[float, float]:
-    """Estimate diameter and average path length via sampled BFS.
+    """Estimate diameter and average path length via sampled C-level BFS.
 
-    Uses reservoir sampling with ``seed`` to select up to ``sample_count``
-    source vertices from the largest connected component, runs single-source
-    BFS from each source, and averages shortest-path lengths to all *other*
-    vertices (excluding self-distance 0).
+    Selects up to ``sample_count`` source vertices from the largest connected
+    component via Algorithm R reservoir sampling and runs SciPy's Cython
+    unweighted ``shortest_path`` one source at a time to keep peak memory
+    bounded to ``O(n)``.
 
     Args:
-        graph: Simple undirected graph.
+        matrix: Symmetric CSR adjacency matrix.
+        largest_component_nodes: Sorted 1D array of 0-based vertex IDs in the
+            largest connected component.
         sample_count: Maximum number of BFS sources to sample.
         seed: Random seed controlling reservoir sampling.
 
     Returns:
         Tuple ``(approximate_diameter, approximate_average_path_length)``, or
-        ``(0.0, 0.0)`` for an empty graph.
+        ``(0.0, 0.0)`` for an empty or single-vertex component.
     """
-    if graph.number_of_nodes() == 0:
+    if largest_component_nodes.size <= 1:
         return 0.0, 0.0
 
-    largest_component = max(nx.connected_components(graph), key=len)
-    subgraph = graph.subgraph(largest_component)
     rng = random.Random(seed)
-    # Algorithm R reservoir sampling over the largest connected component so we
-    # never materialize an extra list of all vertices in memory.
     samples: list[int] = []
-    for index, vertex in enumerate(subgraph):
+    for index, vertex in enumerate(largest_component_nodes.tolist()):
         if index < sample_count:
             samples.append(vertex)
             continue
@@ -209,85 +521,115 @@ def approximate_diameter_and_path_length(
         if replacement < sample_count:
             samples[replacement] = vertex
 
-    eccentricities: list[int] = []
+    eccentricities: list[float] = []
     average_path_lengths: list[float] = []
     for source in samples:
-        maximum_distance = 0
-        distance_sum = 0
-        count = 0
-        for distance in nx.single_source_shortest_path_length(subgraph, source).values():
-            maximum_distance = max(maximum_distance, distance)
-            distance_sum += distance
-            count += 1
-        eccentricities.append(maximum_distance)
+        distances = shortest_path(
+            matrix, directed=False, unweighted=True, indices=source
+        )
+        reachable = distances[np.isfinite(distances)]
+        count = reachable.size
+        eccentricities.append(float(reachable.max()) if count else 0.0)
         # Divide by (count - 1) to exclude the trivial distance 0 from source to itself.
-        average_path_lengths.append(distance_sum / (count - 1) if count > 1 else 0.0)
+        average_path_lengths.append(
+            float(reachable.sum() / (count - 1)) if count > 1 else 0.0
+        )
 
     return float(max(eccentricities)), float(np.mean(average_path_lengths))
 
 
-def degree_entropy(degrees: list[int]) -> float:
+def degree_entropy(degrees: np.ndarray) -> float:
     """Compute base-2 Shannon entropy of a vertex degree sequence.
 
     Args:
-        degrees: List of vertex degrees.
+        degrees: 1D array of vertex degrees.
 
     Returns:
-        Shannon entropy in bits, or ``0.0`` when ``degrees`` is empty.
+        Shannon entropy in bits (normalized so regular graphs return ``0.0``
+        rather than ``-0.0``).
     """
-    if not degrees:
+    if degrees.size == 0:
         return 0.0
     _, counts = np.unique(degrees, return_counts=True)
     probabilities = counts / counts.sum()
-    return float(-np.sum(probabilities * np.log2(probabilities)))
+    entropy = float(-np.sum(probabilities * np.log2(probabilities)))
+    return 0.0 if entropy == 0.0 else entropy
 
 
-def extract_features(graph: nx.Graph, bfs_samples: int, seed: int) -> dict[str, float]:
-    """Compute all 16 structural topological features for a graph.
+def extract_features(
+    graph: CSRGraph,
+    bfs_samples: int,
+    seed: int,
+    exact_triangle_edges: int = 200_000,
+    triangle_samples: int = 10_000,
+) -> dict[str, float]:
+    """Compute all 16 structural topological features for a CSR graph.
+
+    Uses exact Chiba-Nishizeki triangle counting when
+    ``exact_triangle_edges == 0`` or ``graph.n_edges <= exact_triangle_edges``,
+    and unbiased Monte Carlo sampling otherwise.
 
     Args:
-        graph: Simple undirected graph.
+        graph: Validated :class:`CSRGraph`.
         bfs_samples: Number of BFS source vertices for distance estimates.
-        seed: Random seed passed to :func:`approximate_diameter_and_path_length`.
+        seed: Random seed for BFS and (when triggered) triangle sampling.
+        exact_triangle_edges: Edge-count threshold for exact triangle counting;
+            ``0`` forces exact computation regardless of size.
+        triangle_samples: Sample budget used by sampled clustering/transitivity
+            when ``graph.n_edges > exact_triangle_edges``.
 
     Returns:
         Dictionary mapping every name in :data:`FEATURES` to its numeric value.
     """
-    n = graph.number_of_nodes()
-    m = graph.number_of_edges()
-    degrees = [degree for _, degree in graph.degree()]
+    n = graph.n_vertices
+    m = graph.n_edges
+    matrix = graph.matrix
+    indptr = matrix.indptr
+    indices = matrix.indices
+    degrees = np.diff(indptr).astype(np.int64)
 
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            assortativity = nx.degree_assortativity_coefficient(graph)
-        if assortativity is None or math.isnan(assortativity):
-            assortativity = 0.0
-    except Exception:
-        assortativity = 0.0
+    density = (2.0 * m) / (n * (n - 1)) if n > 1 else 0.0
+    assortativity = degree_assortativity(matrix, degrees, m)
 
-    component_count = 0
-    largest_component_size = 0
-    for component in nx.connected_components(graph):
-        component_count += 1
-        largest_component_size = max(largest_component_size, len(component))
-    diameter, average_path_length = approximate_diameter_and_path_length(
-        graph, bfs_samples, seed
-    )
+    if n == 0:
+        component_count = 0
+        largest_component_size = 0
+        diameter, average_path_length = 0.0, 0.0
+        mean_clustering, transitivity = 0.0, 0.0
+    else:
+        component_count, labels = connected_components(
+            matrix, directed=False, return_labels=True
+        )
+        comp_sizes = np.bincount(labels)
+        largest_label = int(np.argmax(comp_sizes))
+        largest_component_size = int(comp_sizes[largest_label])
+        largest_nodes = np.flatnonzero(labels == largest_label)
+        diameter, average_path_length = approximate_diameter_and_path_length(
+            matrix, largest_nodes, bfs_samples, seed
+        )
+        if exact_triangle_edges == 0 or m <= exact_triangle_edges:
+            mean_clustering, transitivity = _exact_clustering_and_transitivity(
+                indptr, indices, degrees
+            )
+        else:
+            mean_clustering, transitivity = _sampled_clustering_and_transitivity(
+                indptr, indices, degrees, triangle_samples, seed
+            )
+
     return {
         "n_vertices": n,
         "n_edges": m,
-        "density": nx.density(graph),
-        "minimum_degree": min(degrees, default=0),
-        "maximum_degree": max(degrees, default=0),
-        "mean_degree": float(np.mean(degrees)) if degrees else 0.0,
-        "median_degree": float(np.median(degrees)) if degrees else 0.0,
-        "degree_std": float(np.std(degrees)) if degrees else 0.0,
+        "density": density,
+        "minimum_degree": int(degrees.min()) if n else 0,
+        "maximum_degree": int(degrees.max()) if n else 0,
+        "mean_degree": float(degrees.mean()) if n else 0.0,
+        "median_degree": float(np.median(degrees)) if n else 0.0,
+        "degree_std": float(degrees.std()) if n else 0.0,
         "degree_entropy": degree_entropy(degrees),
-        "mean_clustering": nx.average_clustering(graph) if n else 0.0,
-        "transitivity": nx.transitivity(graph),
-        "assortativity": float(assortativity),
-        "component_count": component_count,
+        "mean_clustering": mean_clustering,
+        "transitivity": transitivity,
+        "assortativity": assortativity,
+        "component_count": int(component_count),
         "largest_component_fraction": largest_component_size / n if n else 0.0,
         "approximate_diameter": diameter,
         "approximate_average_path_length": average_path_length,
@@ -311,14 +653,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bfs-samples", type=int, default=10)
+    parser.add_argument(
+        "--exact-triangle-edges",
+        type=int,
+        default=200_000,
+        help=(
+            "Compute exact clustering/transitivity up to this edge count and "
+            "switch to unbiased sampling above it; use 0 for always exact "
+            "(default: 200000)"
+        ),
+    )
+    parser.add_argument(
+        "--triangle-samples",
+        type=int,
+        default=10_000,
+        help=(
+            "Monte Carlo sample count for clustering and transitivity when "
+            "m > --exact-triangle-edges (default: 10000)"
+        ),
+    )
     parser.add_argument("--csv", type=Path)
     parser.add_argument("--db-name", help="Dataset name within datasets/")
     parser.add_argument("--db", type=Path, help="Explicit SQLite database path")
     parser.add_argument(
         "--max-vertices",
         type=int,
-        default=500_000,
-        help="Skip graphs above this vertex count; use 0 to disable",
+        default=5_000_000,
+        help="Skip graphs above this vertex count; use 0 to disable (default: 5000000)",
     )
     parser.add_argument(
         "--memory-limit-mb",
@@ -351,6 +712,24 @@ def parse_args() -> argparse.Namespace:
         dest="only_select",
         action="store_true",
         help="Use stored database features without processing new graphs",
+    )
+    parser.add_argument(
+        "--no-log-scale",
+        action="store_true",
+        help=(
+            "Disable log1p scaling of heavy-tailed size/degree features "
+            "before StandardScaler and K-Means"
+        ),
+    )
+    parser.add_argument(
+        "--max-per-series",
+        type=int,
+        default=0,
+        help=(
+            "Cap repetitive temporal snapshot series (e.g. as-733, as-caida) "
+            "to at most this many representative snapshots before global "
+            "clustering; 0 disables (default: 0)"
+        ),
     )
     return parser.parse_args()
 
@@ -415,6 +794,7 @@ def save_csv(
         clusters: 1D array of K-Means cluster indices for each graph.
         selected: Indices of graphs chosen as cluster representatives.
     """
+    selected_set = set(selected)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     with file_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(
@@ -426,7 +806,7 @@ def save_csv(
                 {
                     "file": name,
                     "cluster": int(clusters[index]),
-                    "selected": index in selected,
+                    "selected": index in selected_set,
                     **{
                         feature: format_feature_for_csv(
                             feature, matrix[index, column]
@@ -441,19 +821,24 @@ def _worker(
     file_path: str,
     bfs_samples: int,
     seed: int,
+    exact_triangle_edges: int,
+    triangle_samples: int,
     limit_bytes: int,
     sender,
 ) -> None:
     """Execute feature extraction in a memory-limited child process.
 
     Applies ``resource.RLIMIT_AS`` when ``limit_bytes > 0`` (ignoring platform
-    errors), parses ``file_path``, computes features, and sends
-    ``(True, feature_dict)`` or ``(False, error_message)`` through ``sender``.
+    errors), parses ``file_path`` into CSR, computes features, and sends
+    ``(True, feature_dict)`` or ``(False, truncated_error_message)`` through
+    ``sender``.
 
     Args:
         file_path: String path to the DIMACS ``.col`` file.
         bfs_samples: Number of BFS samples for distance estimation.
-        seed: Random seed for BFS sampling.
+        seed: Random seed for BFS and triangle sampling.
+        exact_triangle_edges: Edge-count threshold for exact triangle counting.
+        triangle_samples: Sample budget when triangle sampling is triggered.
         limit_bytes: Virtual address space cap in bytes (``0`` disables).
         sender: Write end of a multiprocessing ``Pipe``.
     """
@@ -465,11 +850,17 @@ def _worker(
 
     try:
         graph = read_dimacs_col(Path(file_path))
-        sender.send((True, extract_features(graph, bfs_samples, seed)))
+        features = extract_features(
+            graph, bfs_samples, seed, exact_triangle_edges, triangle_samples
+        )
+        sender.send((True, features))
     except MemoryError:
         sender.send((False, "insufficient memory"))
     except Exception as error:
-        sender.send((False, f"{type(error).__name__}: {error}"))
+        message = f"{type(error).__name__}: {error}"
+        if len(message) > MAX_ERROR_MESSAGE_CHARS:
+            message = message[:MAX_ERROR_MESSAGE_CHARS] + "..."
+        sender.send((False, message))
     finally:
         sender.close()
 
@@ -478,19 +869,24 @@ def compute_features_in_subprocess(
     file_path: Path,
     bfs_samples: int,
     seed: int,
+    exact_triangle_edges: int,
+    triangle_samples: int,
     limit_bytes: int,
     timeout_s: float,
 ) -> tuple[bool, dict | str]:
     """Run :func:`_worker` in a forked subprocess with timeout and crash recovery.
 
-    Terminates (and after 5 seconds forcefully kills) workers exceeding
-    ``timeout_s`` and translates OOM kills or pipe ``EOFError`` into a structured
-    failure tuple.
+    Polls the pipe before joining the child process so large payloads cannot
+    deadlock OS pipe buffers, terminates (and after 5 seconds forcefully kills)
+    workers exceeding ``timeout_s``, and translates OOM kills or ``EOFError``
+    into a structured failure tuple.
 
     Args:
         file_path: Path to the DIMACS ``.col`` file.
         bfs_samples: Number of BFS source vertices to sample.
-        seed: Random seed for BFS sampling.
+        seed: Random seed for BFS and triangle sampling.
+        exact_triangle_edges: Edge-count threshold for exact triangle counting.
+        triangle_samples: Sample budget when triangle sampling is triggered.
         limit_bytes: Virtual memory limit in bytes (``0`` disables).
         timeout_s: Wall-clock timeout in seconds (``0`` disables).
 
@@ -502,33 +898,72 @@ def compute_features_in_subprocess(
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(
         target=_worker,
-        args=(str(file_path), bfs_samples, seed, limit_bytes, sender),
+        args=(
+            str(file_path),
+            bfs_samples,
+            seed,
+            exact_triangle_edges,
+            triangle_samples,
+            limit_bytes,
+            sender,
+        ),
     )
     process.start()
     sender.close()
-    process.join(timeout_s if timeout_s > 0 else None)
 
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
+    try:
+        deadline = time.monotonic() + timeout_s if timeout_s > 0 else None
+        got_result = False
+        result: tuple[bool, dict | str] | None = None
+
+        while True:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait = min(1.0, remaining)
+            else:
+                wait = 1.0
+
+            if receiver.poll(wait):
+                try:
+                    result = receiver.recv()
+                    got_result = True
+                except EOFError:
+                    pass
+                break
+
+            if not process.is_alive():
+                if receiver.poll(0):
+                    try:
+                        result = receiver.recv()
+                        got_result = True
+                    except EOFError:
+                        pass
+                break
+
+        if got_result and result is not None:
+            process.join(5)
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+            return result
+
         if process.is_alive():
-            process.kill()
-            process.join()
-        receiver.close()
-        return False, f"timeout after {timeout_s:.0f}s"
+            process.terminate()
+            process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            return False, f"timeout after {timeout_s:.0f}s"
 
-    if receiver.poll(1):
-        try:
-            return receiver.recv()
-        except EOFError:
-            pass
-        finally:
-            receiver.close()
-    receiver.close()
-    return (
-        False,
-        f"process exited without a result (exitcode={process.exitcode}; probable OOM)",
-    )
+        process.join()
+        return (
+            False,
+            f"process exited without a result (exitcode={process.exitcode}; probable OOM)",
+        )
+    finally:
+        receiver.close()
 
 
 def prepare_database(db_path: Path) -> sqlite3.Connection:
@@ -536,7 +971,9 @@ def prepare_database(db_path: Path) -> sqlite3.Connection:
 
     Configures ``WAL`` journal mode and ``synchronous=NORMAL``, renames any
     legacy Portuguese column names in ``features`` and ``failures`` to English,
-    and creates the ``features``, ``failures``, and ``sources`` tables if absent.
+    creates the ``features``, ``failures``, and ``sources`` tables if absent,
+    and adds ``exact_triangle_edges`` and ``triangle_samples`` columns to older
+    ``sources`` tables.
 
     Args:
         db_path: Path to the SQLite database file.
@@ -589,8 +1026,15 @@ def prepare_database(db_path: Path) -> sqlite3.Connection:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS sources "
         "(file TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, "
-        "bfs_samples INTEGER, seed INTEGER, feature_version INTEGER)"
+        "bfs_samples INTEGER, seed INTEGER, feature_version INTEGER, "
+        "exact_triangle_edges INTEGER, triangle_samples INTEGER)"
     )
+    source_columns = {
+        row[1] for row in connection.execute('PRAGMA table_info("sources")')
+    }
+    for column in ("exact_triangle_edges", "triangle_samples"):
+        if column not in source_columns:
+            connection.execute(f'ALTER TABLE sources ADD COLUMN "{column}" INTEGER')
     connection.commit()
     return connection
 
@@ -616,6 +1060,8 @@ def compute_and_store_features(
     files: list[Path],
     bfs_samples: int,
     seed: int,
+    exact_triangle_edges: int,
+    triangle_samples: int,
     db_path: Path,
     max_vertices: int,
     memory_limit_mb: int,
@@ -623,33 +1069,48 @@ def compute_and_store_features(
 ) -> None:
     """Extract and persist features for pending, modified, or previously failed files.
 
-    Reuses cached entries only when ``(mtime_ns, size, bfs_samples, seed, 2)``
-    matches the ``sources`` table joined with ``features``. Processes pending
-    graphs in ascending size order, committing each success or failure
-    immediately so interrupted runs can resume.
+    Reuses cached entries only when
+    ``(mtime_ns, size, bfs_samples, seed, FEATURE_VERSION, exact_triangle_edges, triangle_samples)``
+    matches the ``sources`` table joined with ``features``. Closes the SQLite
+    connection before every ``fork()`` so worker subprocesses never inherit
+    open WAL descriptors, and commits each graph immediately for resumability.
 
     Args:
         files: Candidate ``.col`` files to process.
         bfs_samples: Number of BFS samples per graph.
-        seed: Random seed for BFS sampling.
+        seed: Random seed for BFS and triangle sampling.
+        exact_triangle_edges: Edge-count threshold for exact triangle counting.
+        triangle_samples: Sample budget when triangle sampling is triggered.
         db_path: Path to the persistent SQLite cache.
         max_vertices: Maximum allowed declared vertex count (``0`` disables).
         memory_limit_mb: Per-worker virtual memory cap in MiB (``0`` disables).
         timeout_s: Per-worker timeout in seconds (``0`` disables).
     """
-    connection = prepare_database(db_path)
-    cached_sources = {
-        record[0]: tuple(record[1:])
-        for record in connection.execute(
-            "SELECT sources.* FROM sources JOIN features USING (file)"
-        )
-    }
-    fingerprints = {}
+    with closing(prepare_database(db_path)) as connection:
+        cached_sources = {
+            record[0]: tuple(record[1:])
+            for record in connection.execute(
+                "SELECT s.file, s.mtime_ns, s.size, s.bfs_samples, s.seed, "
+                "s.feature_version, s.exact_triangle_edges, s.triangle_samples "
+                "FROM sources s JOIN features f USING (file)"
+            )
+        }
+
+    fingerprints: dict[str, tuple[int, int, int, int, int, int, int]] = {}
     for path in files:
         stat = path.stat()
-        fingerprints[path.name] = (stat.st_mtime_ns, stat.st_size, bfs_samples, seed, 2)
+        fingerprints[path.name] = (
+            stat.st_mtime_ns,
+            stat.st_size,
+            bfs_samples,
+            seed,
+            FEATURE_VERSION,
+            exact_triangle_edges,
+            triangle_samples,
+        )
     pending = [
-        file_path for file_path in sort_by_size(files)
+        file_path
+        for file_path in sort_by_size(files)
         if cached_sources.get(file_path.name) != fingerprints[file_path.name]
     ]
     print(
@@ -657,49 +1118,65 @@ def compute_and_store_features(
         f"pending: {len(pending)}"
     )
 
+    feature_columns = ", ".join(f'"{feature}"' for feature in FEATURES)
     placeholders = ", ".join("?" for _ in range(1 + len(FEATURES)))
     limit_bytes = memory_limit_mb * 1024 * 1024
+
     for index, file_path in enumerate(pending, start=1):
-        connection.execute("DELETE FROM features WHERE file = ?", (file_path.name,))
-        connection.execute("DELETE FROM failures WHERE file = ?", (file_path.name,))
-        connection.execute("DELETE FROM sources WHERE file = ?", (file_path.name,))
         header = read_dimacs_header(file_path)
         if max_vertices > 0 and header and header[0] > max_vertices:
             reason = f"n={header[0]} exceeds max-vertices={max_vertices}"
-            connection.execute(
-                "INSERT OR REPLACE INTO failures VALUES (?, ?)",
-                (file_path.name, reason),
-            )
-            connection.commit()
+            with closing(prepare_database(db_path)) as connection:
+                connection.execute("DELETE FROM features WHERE file = ?", (file_path.name,))
+                connection.execute("DELETE FROM sources WHERE file = ?", (file_path.name,))
+                connection.execute(
+                    "INSERT OR REPLACE INTO failures (file, reason) VALUES (?, ?)",
+                    (file_path.name, reason),
+                )
+                connection.commit()
             print(f"[{index}/{len(pending)}] {file_path.name}: SKIPPED ({reason})")
             continue
 
+        # No SQLite connection is open across fork().
         success, result = compute_features_in_subprocess(
-            file_path, bfs_samples, seed, limit_bytes, timeout_s
+            file_path,
+            bfs_samples,
+            seed,
+            exact_triangle_edges,
+            triangle_samples,
+            limit_bytes,
+            timeout_s,
         )
-        if success:
-            connection.execute(
-                f"INSERT OR REPLACE INTO features VALUES ({placeholders})",
-                (file_path.name, *(result[feature] for feature in FEATURES)),
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?, ?, ?)",
-                (file_path.name, *fingerprints[file_path.name]),
-            )
-            connection.commit()
-            print(
-                f"[{index}/{len(pending)}] {file_path.name}: "
-                f"n={result['n_vertices']}, m={result['n_edges']}, "
-                f"density={result['density']:.6f} [OK]"
-            )
-        else:
-            connection.execute(
-                "INSERT OR REPLACE INTO failures VALUES (?, ?)",
-                (file_path.name, str(result)),
-            )
-            connection.commit()
-            print(f"[{index}/{len(pending)}] {file_path.name}: FAILED ({result})")
-    connection.close()
+        with closing(prepare_database(db_path)) as connection:
+            connection.execute("DELETE FROM features WHERE file = ?", (file_path.name,))
+            connection.execute("DELETE FROM failures WHERE file = ?", (file_path.name,))
+            connection.execute("DELETE FROM sources WHERE file = ?", (file_path.name,))
+            if success and isinstance(result, dict):
+                connection.execute(
+                    f"INSERT OR REPLACE INTO features (file, {feature_columns}) "
+                    f"VALUES ({placeholders})",
+                    (file_path.name, *(result[feature] for feature in FEATURES)),
+                )
+                connection.execute(
+                    "INSERT OR REPLACE INTO sources "
+                    "(file, mtime_ns, size, bfs_samples, seed, feature_version, "
+                    "exact_triangle_edges, triangle_samples) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (file_path.name, *fingerprints[file_path.name]),
+                )
+                connection.commit()
+                print(
+                    f"[{index}/{len(pending)}] {file_path.name}: "
+                    f"n={result['n_vertices']}, m={result['n_edges']}, "
+                    f"density={result['density']:.6f} [OK]"
+                )
+            else:
+                connection.execute(
+                    "INSERT OR REPLACE INTO failures (file, reason) VALUES (?, ?)",
+                    (file_path.name, str(result)),
+                )
+                connection.commit()
+                print(f"[{index}/{len(pending)}] {file_path.name}: FAILED ({result})")
 
 
 def load_features(
@@ -728,13 +1205,154 @@ def load_features(
     return names, matrix, failures
 
 
+def transform_features_for_clustering(
+    matrix: np.ndarray, log_scale: bool
+) -> np.ndarray:
+    """Prepare the feature matrix for distance-based clustering.
+
+    Optionally applies ``log1p`` to non-negative heavy-tailed scale features
+    (sizes, degrees, component count, path distances) before zero-mean /
+    unit-variance standardization.
+
+    Args:
+        matrix: 2D ``float64`` feature matrix of shape ``(n_graphs, len(FEATURES))``.
+        log_scale: If ``True``, apply ``np.log1p`` to scale features first.
+
+    Returns:
+        Standardized 2D ``float64`` feature matrix.
+    """
+    transformed = matrix.astype(np.float64, copy=True)
+    if log_scale:
+        for column in LOG_SCALED_FEATURE_INDICES:
+            transformed[:, column] = np.log1p(np.maximum(transformed[:, column], 0.0))
+    return StandardScaler().fit_transform(transformed)
+
+
+def select_representatives_kmeans(
+    matrix: np.ndarray, target_count: int, seed: int, log_scale: bool
+) -> tuple[np.ndarray, list[int]]:
+    """Cluster standardized feature vectors with K-Means and pick representatives.
+
+    Chooses the graph nearest each non-empty cluster centroid in Euclidean
+    distance. If empty clusters leave fewer than ``target_count`` graphs, fills
+    remaining slots via greedy farthest-first traversal so every added graph
+    maximizes its minimum distance to the already-selected set.
+
+    Args:
+        matrix: 2D ``float64`` feature matrix of shape ``(n_graphs, len(FEATURES))``.
+        target_count: Number of representatives to choose (``1 <= target_count <= n_graphs``).
+        seed: Random seed for ``KMeans``.
+        log_scale: Forwarded to :func:`transform_features_for_clustering`.
+
+    Returns:
+        Tuple ``(cluster_labels, selected_indices)``.
+    """
+    n_graphs = matrix.shape[0]
+    standardized_matrix = transform_features_for_clustering(matrix, log_scale)
+    kmeans = KMeans(n_clusters=target_count, random_state=seed, n_init=10)
+    clusters = kmeans.fit_predict(standardized_matrix)
+
+    selected: list[int] = []
+    for cluster in range(target_count):
+        indices = np.where(clusters == cluster)[0]
+        if not len(indices):
+            continue
+        points = standardized_matrix[indices]
+        distances = np.linalg.norm(points - kmeans.cluster_centers_[cluster], axis=1)
+        selected.append(int(indices[np.argmin(distances)]))
+
+    # Greedy farthest-first fallback when duplicate points produce empty clusters.
+    if len(selected) < target_count:
+        remaining = [index for index in range(n_graphs) if index not in selected]
+        while len(selected) < target_count and remaining:
+            chosen = standardized_matrix[selected]
+            min_distances = [
+                float(np.min(np.linalg.norm(chosen - standardized_matrix[index], axis=1)))
+                for index in remaining
+            ]
+            best_pos = int(np.argmax(min_distances))
+            selected.append(remaining.pop(best_pos))
+
+    return clusters, selected
+
+
+def temporal_series_key(filename: str) -> str | None:
+    """Return a canonical series identifier for known snapshot floods, or ``None``.
+
+    Args:
+        filename: Graph filename (e.g. ``as19971108.col``).
+
+    Returns:
+        Canonical series name if the stem matches a known temporal snapshot
+        pattern; otherwise ``None``.
+    """
+    stem = Path(filename).stem
+    for pattern, series_name in TEMPORAL_SERIES_PATTERNS:
+        if pattern.fullmatch(stem):
+            return series_name
+    return None
+
+
+def collapse_temporal_series(
+    names: list[str],
+    matrix: np.ndarray,
+    max_per_series: int,
+    seed: int,
+    log_scale: bool,
+) -> tuple[list[str], np.ndarray]:
+    """Reduce oversized temporal snapshot series before global clustering.
+
+    Any recognized snapshot series containing more than ``max_per_series``
+    graphs is condensed to its ``max_per_series`` most structurally
+    representative snapshots via :func:`select_representatives_kmeans`. Graphs
+    outside recognized series (or series already within the limit) are kept
+    unchanged.
+
+    Args:
+        names: Ordered list of eligible graph filenames.
+        matrix: Matching 2D ``float64`` feature array.
+        max_per_series: Maximum snapshots retained per recognized series.
+        seed: Random seed forwarded to within-series K-Means.
+        log_scale: Forwarded to within-series K-Means.
+
+    Returns:
+        Filtered ``(names, matrix)`` tuple preserving deterministic ordering.
+    """
+    series_groups: dict[str, list[int]] = {}
+    kept_indices: list[int] = []
+    for index, name in enumerate(names):
+        series = temporal_series_key(name)
+        if series is None:
+            kept_indices.append(index)
+        else:
+            series_groups.setdefault(series, []).append(index)
+
+    for series_name in sorted(series_groups):
+        group = series_groups[series_name]
+        if len(group) <= max_per_series:
+            kept_indices.extend(group)
+            continue
+        _, local_selected = select_representatives_kmeans(
+            matrix[group], max_per_series, seed, log_scale
+        )
+        chosen = [group[pos] for pos in local_selected]
+        kept_indices.extend(chosen)
+        print(
+            f"Temporal series '{series_name}': kept {len(chosen)} of {len(group)} "
+            f"representative snapshots"
+        )
+
+    kept_indices.sort()
+    return [names[index] for index in kept_indices], matrix[kept_indices]
+
+
 def main() -> None:
     """Run feature extraction, K-Means representative selection, and file export.
 
     Validates CLI parameters, optionally updates the SQLite feature cache,
-    filters cached rows to currently present eligible inputs, clusters
-    standardized feature vectors with K-Means (with farthest-point fallback for
-    empty clusters), synchronizes ``*.col`` files in ``--out``, and optionally
+    filters cached rows to currently present eligible inputs, optionally caps
+    repetitive temporal snapshot series, clusters standardized feature vectors
+    with K-Means, synchronizes ``*.col`` files in ``--out``, and optionally
     writes a CSV report.
 
     Raises:
@@ -751,12 +1369,18 @@ def main() -> None:
         raise ValueError("n must be at least 1")
     if args.bfs_samples < 1:
         raise ValueError("bfs-samples must be at least 1")
+    if args.exact_triangle_edges < 0:
+        raise ValueError("exact-triangle-edges must be at least 0")
+    if args.triangle_samples < 1:
+        raise ValueError("triangle-samples must be at least 1")
     if args.max_vertices < 0:
         raise ValueError("max-vertices must be at least 0")
     if args.memory_limit_mb < 0:
         raise ValueError("memory-limit-mb must be at least 0")
     if not math.isfinite(args.timeout_s) or args.timeout_s < 0:
         raise ValueError("timeout-s must be finite and at least 0")
+    if args.max_per_series < 0:
+        raise ValueError("max-per-series must be at least 0")
     if args.input_dir.resolve() == args.out.resolve():
         raise ValueError("input-dir and out must be different directories")
 
@@ -765,10 +1389,12 @@ def main() -> None:
         files = sorted(args.input_dir.glob("*.col"))
         if args.skip_edgeless:
             invalid = [
-                file_path for file_path in files
+                file_path
+                for file_path in files
                 if not has_vertices_and_edges(file_path)
             ]
-            files = [file_path for file_path in files if file_path not in invalid]
+            invalid_set = set(invalid)
+            files = [file_path for file_path in files if file_path not in invalid_set]
             for file_path in invalid:
                 print(f"IGNORED [no edges]: {file_path}")
         if not files:
@@ -779,6 +1405,8 @@ def main() -> None:
             files,
             args.bfs_samples,
             args.seed,
+            args.exact_triangle_edges,
+            args.triangle_samples,
             database_path,
             args.max_vertices,
             args.memory_limit_mb,
@@ -790,7 +1418,8 @@ def main() -> None:
     names, matrix, failures = load_features(database_path)
     # A cleanup may have removed files since their features were cached.
     available = [
-        index for index, name in enumerate(names)
+        index
+        for index, name in enumerate(names)
         if (args.input_dir / name).is_file()
         and (not args.skip_edgeless or has_vertices_and_edges(args.input_dir / name))
         and (args.max_vertices == 0 or matrix[index, 0] <= args.max_vertices)
@@ -803,6 +1432,18 @@ def main() -> None:
             print(f"  {name}: {reason}")
     if not names:
         raise RuntimeError("no graph was processed successfully")
+
+    log_scale = not args.no_log_scale
+    if args.max_per_series > 0:
+        before_count = len(names)
+        names, matrix = collapse_temporal_series(
+            names, matrix, args.max_per_series, args.seed, log_scale
+        )
+        if len(names) < before_count:
+            print(
+                f"After temporal series cap (--max-per-series {args.max_per_series}): "
+                f"{len(names)} of {before_count} graphs enter global clustering"
+            )
 
     target_count = args.n
     if target_count > len(names):
@@ -817,34 +1458,9 @@ def main() -> None:
         )
         target_count = len(names)
 
-    standardized_matrix = StandardScaler().fit_transform(matrix)
-    kmeans = KMeans(n_clusters=target_count, random_state=args.seed, n_init=10)
-    clusters = kmeans.fit_predict(standardized_matrix)
-
-    selected: list[int] = []
-    for cluster in range(target_count):
-        indices = np.where(clusters == cluster)[0]
-        if not len(indices):
-            continue
-        points = standardized_matrix[indices]
-        distances = np.linalg.norm(points - kmeans.cluster_centers_[cluster], axis=1)
-        selected.append(int(indices[np.argmin(distances)]))
-
-    if len(selected) < target_count:
-        # Empty K-Means clusters can leave fewer representatives than requested;
-        # fill remaining slots with points farthest from the chosen set.
-        remaining = [
-            index for index in range(len(names)) if index not in selected
-        ]
-        chosen = standardized_matrix[selected]
-        distances = [
-            np.min(np.linalg.norm(chosen - standardized_matrix[index], axis=1))
-            for index in remaining
-        ]
-        order = np.argsort(distances)[::-1]
-        selected.extend(
-            remaining[index] for index in order[: target_count - len(selected)]
-        )
+    clusters, selected = select_representatives_kmeans(
+        matrix, target_count, args.seed, log_scale
+    )
 
     args.out.mkdir(parents=True, exist_ok=True)
     selected_names = {names[index] for index in selected}
