@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Baixa a coleção Harwell-Boeing do SuiteSparse."""
+"""Download the Harwell-Boeing collection from SuiteSparse."""
 
 from __future__ import annotations
 
+import argparse
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from shutil import move
 
-import ssgetpy
-
-
-def baixar_matriz(matrix, destination: Path) -> bool:
-    """Baixa e extrai uma matriz que ainda não existe no destino."""
+def download_matrix(matrix, destination: Path) -> bool:
+    """Download and extract a matrix that does not exist at the destination."""
     if (destination / f"{matrix.name}.mtx").exists():
         return False
 
@@ -20,24 +18,24 @@ def baixar_matriz(matrix, destination: Path) -> bool:
     return True
 
 
-def baixar_matrizes_em_paralelo(matrices, destination: Path, workers: int) -> None:
-    """Baixa e extrai matrizes usando múltiplas threads."""
+def download_matrices_in_parallel(matrices, destination: Path, workers: int) -> None:
+    """Download and extract matrices using multiple threads."""
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
-            executor.submit(baixar_matriz, matrix, destination): matrix
+            executor.submit(download_matrix, matrix, destination): matrix
             for matrix in matrices
         }
 
         total = len(downloads)
-        for concluido, future in enumerate(as_completed(downloads), start=1):
+        for completed, future in enumerate(as_completed(downloads), start=1):
             matrix = downloads[future]
-            baixada = future.result()
-            status = "OK" if baixada else "JÁ EXISTIA"
-            print(f"  [{concluido}/{total}] {status}: {matrix.name}")
+            downloaded = future.result()
+            status = "OK" if downloaded else "ALREADY EXISTS"
+            print(f"  [{completed}/{total}] {status}: {matrix.name}")
 
 
-def mover_matrizes_para_raiz(destination: Path) -> int:
-    """Move os arquivos .mtx extraídos para a raiz do diretório raw."""
+def move_matrices_to_root(destination: Path) -> int:
+    """Move extracted .mtx files to the raw directory root."""
     moved_files = 0
 
     for source in destination.rglob("*.mtx"):
@@ -47,13 +45,13 @@ def mover_matrizes_para_raiz(destination: Path) -> int:
         target = destination / source.name
         if target.exists():
             raise FileExistsError(
-                f"Não foi possível mover {source}: o arquivo {target} já existe."
+                f"Could not move {source}: file {target} already exists."
             )
 
         move(source, target)
         moved_files += 1
 
-    # Remove somente os diretórios que ficaram vazios após a movimentação.
+    # Remove only directories left empty after moving files.
     directories = sorted(
         (path for path in destination.rglob("*") if path.is_dir()),
         key=lambda path: len(path.parts),
@@ -69,11 +67,14 @@ def mover_matrizes_para_raiz(destination: Path) -> int:
 
 
 def main() -> None:
+    argparse.ArgumentParser(description=__doc__).parse_args()
+    import ssgetpy
+
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
+            "PROJECT_ROOT is not set. Run this script through mise or "
+            "set the environment variable explicitly."
         )
 
     destination = Path(project_root) / "datasets" / "harwell_boeing" / "raw"
@@ -81,27 +82,27 @@ def main() -> None:
 
     matrices = ssgetpy.search(group="HB", limit=10_000)
     if not matrices:
-        raise RuntimeError("Nenhuma matriz da coleção Harwell-Boeing foi encontrada.")
+        raise RuntimeError("No matrices were found in the Harwell-Boeing collection.")
 
     try:
         workers = int(os.environ.get("HARWELL_BOEING_DOWNLOAD_WORKERS", "15"))
     except ValueError as error:
         raise ValueError(
-            "HARWELL_BOEING_DOWNLOAD_WORKERS deve ser um número inteiro."
+            "HARWELL_BOEING_DOWNLOAD_WORKERS must be an integer."
         ) from error
     if workers < 1:
         raise ValueError(
-            "HARWELL_BOEING_DOWNLOAD_WORKERS deve ser maior ou igual a 1."
+            "HARWELL_BOEING_DOWNLOAD_WORKERS must be at least 1."
         )
 
     print(
-        f"Baixando {len(matrices)} matrizes para {destination} "
-        f"com {workers} downloads simultâneos"
+        f"Downloading {len(matrices)} matrices to {destination} "
+        f"with {workers} concurrent downloads"
     )
-    baixar_matrizes_em_paralelo(matrices, destination, workers)
+    download_matrices_in_parallel(matrices, destination, workers)
 
-    moved_files = mover_matrizes_para_raiz(destination)
-    print(f"{moved_files} arquivos .mtx movidos para {destination}")
+    moved_files = move_matrices_to_root(destination)
+    print(f"{moved_files} .mtx files moved to {destination}")
 
 
 if __name__ == "__main__":

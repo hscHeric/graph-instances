@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Baixa os grafos em lista de arestas da coleção Stanford SNAP."""
+"""Download edge-list graphs from the Stanford SNAP collection."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ import requests
 
 BASE_URL = "https://snap.stanford.edu/data"
 
-# Arquivos conferidos nas páginas individuais oficiais do SNAP.
-ARQUIVOS_NA_RAIZ = [
+# Files verified against their individual official SNAP pages.
+ROOT_FILES = [
     "facebook_combined.txt.gz", "gplus_combined.txt.gz", "twitter_combined.txt.gz",
     "soc-Epinions1.txt.gz", "soc-LiveJournal1.txt.gz",
     "soc-pokec-relationships.txt.gz", "soc-Slashdot0811.txt.gz",
@@ -37,8 +37,8 @@ ARQUIVOS_NA_RAIZ = [
     "roadNet-PA.txt.gz", "roadNet-TX.txt.gz", "as-733.tar.gz",
     "as-skitter.txt.gz", "as-caida.tar.gz",
     *[
-        f"oregon{familia}_{data}.txt.gz"
-        for familia in (1, 2)
+        f"oregon{family}_{data}.txt.gz"
+        for family in (1, 2)
         for data in (
             "010331", "010407", "010414", "010421", "010428",
             "010505", "010512", "010519", "010526",
@@ -59,10 +59,10 @@ ARQUIVOS_NA_RAIZ = [
     "wikipedia.zip",
 ]
 
-SNAP_URLS = [f"{BASE_URL}/{nome}" for nome in ARQUIVOS_NA_RAIZ]
+SNAP_URLS = [f"{BASE_URL}/{name}" for name in ROOT_FILES]
 SNAP_URLS += [
-    f"{BASE_URL}/bigdata/communities/{nome}"
-    for nome in (
+    f"{BASE_URL}/bigdata/communities/{name}"
+    for name in (
         "com-lj.ungraph.txt.gz",
         "com-orkut.ungraph.txt.gz",
         "com-youtube.ungraph.txt.gz",
@@ -78,81 +78,81 @@ FRIENDSTER_URL = f"{BASE_URL}/bigdata/communities/com-friendster.ungraph.txt.gz"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Baixa e extrai os grafos da coleção Stanford SNAP."
+        description="Download and extract graphs from the Stanford SNAP collection."
     )
     parser.add_argument(
-        "--incluir-friendster",
+        "--include-friendster",
         action="store_true",
-        help="Inclui o grafo com-Friendster, que é excepcionalmente grande.",
+        help="Include the exceptionally large com-Friendster graph.",
     )
     return parser.parse_args()
 
 
-def baixar_arquivo(url: str, destino: Path) -> tuple[str, Path | None]:
-    """Baixa um arquivo de forma incremental e permite retomar a task."""
-    nome = Path(urlparse(url).path).name
-    marcador = destino / ".concluidos" / nome
-    if marcador.exists():
-        return "JÁ EXISTIA", None
+def download_file(url: str, destination: Path) -> tuple[str, Path | None]:
+    """Stream a file download and allow the task to resume."""
+    name = Path(urlparse(url).path).name
+    marker = destination / ".completed" / name
+    if marker.exists() or (destination / ".concluidos" / name).exists():
+        return "ALREADY EXISTS", None
 
-    nome_saida = nome.removesuffix(".gz") if not nome.endswith(".tar.gz") else nome
-    caminho_saida = destino / nome_saida
-    if caminho_saida.exists():
-        return "JÁ EXISTIA", caminho_saida
+    temporary = destination / ".downloads" / name
+    temporary.parent.mkdir(parents=True, exist_ok=True)
 
-    temporario = destino / ".downloads" / nome
-    temporario.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, timeout=300, stream=True) as response:
+        response.raise_for_status()
+        with temporary.open("wb") as file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    file.write(chunk)
 
-    with requests.get(url, timeout=300, stream=True) as resposta:
-        resposta.raise_for_status()
-        with temporario.open("wb") as arquivo:
-            for bloco in resposta.iter_content(chunk_size=1024 * 1024):
-                if bloco:
-                    arquivo.write(bloco)
-
-    return "OK", temporario
+    return "OK", temporary
 
 
-def extrair_arquivo(nome: str, origem: Path, destino: Path) -> int:
-    """Extrai o arquivo baixado e retorna a quantidade de arquivos produzidos."""
-    if nome.endswith(".tar.gz"):
-        with tarfile.open(origem, "r:gz") as arquivo:
-            arquivo.extractall(destino, filter="data")
-        origem.unlink()
-    elif nome.endswith(".zip"):
-        with zipfile.ZipFile(origem) as arquivo:
-            arquivo.extractall(destino)
-        origem.unlink()
-    elif nome.endswith(".gz"):
-        saida = destino / nome.removesuffix(".gz")
-        with gzip.open(origem, "rb") as compactado, saida.open("wb") as arquivo:
-            copyfileobj(compactado, arquivo)
-        origem.unlink()
+def extract_file(name: str, source: Path, destination: Path) -> int:
+    """Extract a downloaded file and return the number of files produced."""
+    if name.endswith(".tar.gz"):
+        with tarfile.open(source, "r:gz") as file:
+            file.extractall(destination, filter="data")
+        source.unlink()
+    elif name.endswith(".zip"):
+        with zipfile.ZipFile(source) as file:
+            file.extractall(destination)
+        source.unlink()
+    elif name.endswith(".gz"):
+        output_file = destination / name.removesuffix(".gz")
+        temporary_output = source.with_name(source.name + ".extracted")
+        try:
+            with gzip.open(source, "rb") as compressed, temporary_output.open("wb") as file:
+                copyfileobj(compressed, file)
+            temporary_output.replace(output_file)
+        finally:
+            temporary_output.unlink(missing_ok=True)
+        source.unlink()
     else:
-        origem.replace(destino / Path(urlparse(nome).path).name)
+        source.replace(destination / Path(urlparse(name).path).name)
 
-    marcador = destino / ".concluidos" / nome
-    marcador.parent.mkdir(parents=True, exist_ok=True)
-    marcador.touch()
+    marker = destination / ".completed" / name
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.touch()
     return 1
 
 
-def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
-    """Move arquivos de subpastas para raw e descarta arquivos readme."""
-    movidos = 0
-    descartados = 0
+def move_files_to_root(destination: Path) -> tuple[int, int]:
+    """Move files from subdirectories to raw and discard readme files."""
+    moved = 0
+    discarded = 0
 
     for source in sorted(destination.rglob("*"), key=lambda path: str(path)):
         if source.is_dir():
             continue
 
-        relativo = source.relative_to(destination)
-        if relativo.parts[0] in {".downloads", ".concluidos"}:
+        relative = source.relative_to(destination)
+        if relative.parts[0] in {".downloads", ".completed", ".concluidos"}:
             continue
 
         if source.name.lower().startswith("readme") or source.name.startswith("._"):
             source.unlink()
-            descartados += 1
+            discarded += 1
             continue
 
         if source.parent == destination:
@@ -160,19 +160,19 @@ def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
 
         target = destination / source.name
         if target.exists():
-            prefixo = "_".join(relativo.parent.parts)
-            target = destination / f"{prefixo}_{source.name}"
+            prefix = "_".join(relative.parent.parts)
+            target = destination / f"{prefix}_{source.name}"
 
-        contador = 2
-        candidato = target
-        while candidato.exists():
-            candidato = target.with_name(
-                f"{target.stem}_{contador}{target.suffix}"
+        counter = 2
+        candidate = target
+        while candidate.exists():
+            candidate = target.with_name(
+                f"{target.stem}_{counter}{target.suffix}"
             )
-            contador += 1
+            counter += 1
 
-        move(source, candidato)
-        movidos += 1
+        move(source, candidate)
+        moved += 1
 
     directories = sorted(
         (
@@ -180,7 +180,7 @@ def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
             for path in destination.rglob("*")
             if path.is_dir()
             and path.relative_to(destination).parts[0]
-            not in {".downloads", ".concluidos"}
+            not in {".downloads", ".completed", ".concluidos"}
         ),
         key=lambda path: len(path.parts),
         reverse=True,
@@ -191,7 +191,7 @@ def mover_arquivos_para_raiz(destination: Path) -> tuple[int, int]:
         except OSError:
             pass
 
-    return movidos, descartados
+    return moved, discarded
 
 
 def main() -> None:
@@ -199,61 +199,62 @@ def main() -> None:
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
+            "PROJECT_ROOT is not set. Run this script through mise or "
+            "set the environment variable explicitly."
         )
 
-    destino = Path(project_root) / "datasets" / "snap" / "raw"
-    destino.mkdir(parents=True, exist_ok=True)
-    urls = [*SNAP_URLS, FRIENDSTER_URL] if args.incluir_friendster else SNAP_URLS
+    destination = Path(project_root) / "datasets" / "snap" / "raw"
+    destination.mkdir(parents=True, exist_ok=True)
+    urls = [*SNAP_URLS, FRIENDSTER_URL] if args.include_friendster else SNAP_URLS
 
     try:
         workers = int(os.environ.get("SNAP_DOWNLOAD_WORKERS", str(len(urls))))
     except ValueError as error:
-        raise ValueError("SNAP_DOWNLOAD_WORKERS deve ser um número inteiro.") from error
+        raise ValueError("SNAP_DOWNLOAD_WORKERS must be an integer.") from error
     if workers < 1:
-        raise ValueError("SNAP_DOWNLOAD_WORKERS deve ser maior ou igual a 1.")
+        raise ValueError("SNAP_DOWNLOAD_WORKERS must be at least 1.")
 
     print(
-        f"Baixando {len(urls)} arquivos SNAP para {destino} "
-        f"com {workers} downloads simultâneos"
+        f"Downloading {len(urls)} SNAP files to {destination} "
+        f"with {workers} concurrent downloads"
     )
-    falhas: list[str] = []
-    baixados: list[tuple[str, Path]] = []
+    failures: list[str] = []
+    downloaded_files: list[tuple[str, Path]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
-            executor.submit(baixar_arquivo, url, destino): url
+            executor.submit(download_file, url, destination): url
             for url in urls
         }
-        for concluido, future in enumerate(as_completed(downloads), start=1):
+        for completed, future in enumerate(as_completed(downloads), start=1):
             url = downloads[future]
-            nome = Path(urlparse(url).path).name
+            name = Path(urlparse(url).path).name
             try:
-                status, caminho = future.result()
-                print(f"  [{concluido}/{len(urls)}] {status}: {nome}")
-                if status == "OK" and caminho is not None:
-                    baixados.append((nome, caminho))
+                status, file_path = future.result()
+                print(f"  [{completed}/{len(urls)}] {status}: {name}")
+                if status == "OK" and file_path is not None:
+                    downloaded_files.append((name, file_path))
             except (requests.RequestException, OSError) as error:
-                print(f"  [{concluido}/{len(urls)}] FALHOU: {nome}: {error}")
-                falhas.append(nome)
+                print(f"  [{completed}/{len(urls)}] FAILED: {name}: {error}")
+                failures.append(name)
 
-    for nome, caminho in baixados:
+    for name, file_path in downloaded_files:
         try:
-            extrair_arquivo(nome, caminho, destino)
-        except (OSError, gzip.BadGzipFile, tarfile.TarError, zipfile.BadZipFile) as error:
-            print(f"  FALHOU ao extrair {nome}: {error}")
-            falhas.append(nome)
+            extract_file(name, file_path, destination)
+        except (OSError, EOFError, gzip.BadGzipFile, tarfile.TarError, zipfile.BadZipFile) as error:
+            print(f"  FAILED to extract {name}: {error}")
+            failures.append(name)
 
-    movidos, descartados = mover_arquivos_para_raiz(destino)
+    moved, discarded = move_files_to_root(destination)
     print(
-        f"Organização concluída: {movidos} arquivos movidos para {destino} "
-        f"e {descartados} arquivos auxiliares descartados."
+        f"Organization complete: {moved} files moved to {destination} "
+        f"and {discarded} auxiliary files discarded."
     )
 
-    if falhas:
-        print(f"{len(falhas)} arquivos falharam: {', '.join(sorted(set(falhas)))}")
+    if failures:
+        print(f"{len(failures)} files failed: {', '.join(sorted(set(failures)))}")
+        raise SystemExit(1)
     else:
-        print("Todos os arquivos SNAP foram baixados e extraídos.")
+        print("All SNAP files have been downloaded and extracted.")
 
 
 if __name__ == "__main__":

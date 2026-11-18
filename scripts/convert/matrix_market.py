@@ -1,9 +1,9 @@
-"""Converte matrizes Matrix Market em grafos DIMACS .col."""
+"""Convert Matrix Market matrices to DIMACS .col graphs."""
 
 from __future__ import annotations
 
+import argparse
 import os
-import sys
 import tempfile
 from pathlib import Path
 
@@ -11,131 +11,140 @@ import scipy.io
 import scipy.sparse
 
 
-def ler_matriz(caminho_mtx: Path):
-    """Lê uma matriz, corrigindo metadados coordinate inconsistentes em cópia."""
-    with caminho_mtx.open("r", encoding="utf-8") as arquivo:
-        banner = arquivo.readline()
+def read_matrix(mtx_path: Path):
+    """Read a matrix, correcting inconsistent coordinate metadata in a copy."""
+    with mtx_path.open("r", encoding="utf-8") as file:
+        banner = file.readline()
         if not banner.lower().startswith("%%matrixmarket matrix coordinate"):
-            return scipy.io.mmread(caminho_mtx, spmatrix=True)
+            return scipy.io.mmread(mtx_path, spmatrix=True)
 
-        numero_linha_dimensoes = 1
-        for linha in arquivo:
-            numero_linha_dimensoes += 1
-            texto = linha.strip()
-            if texto and not texto.startswith("%"):
-                dimensoes = texto.split()
+        dimensions_line_number = 1
+        for line in file:
+            dimensions_line_number += 1
+            text = line.strip()
+            if text and not text.startswith("%"):
+                dimensions = text.split()
                 break
         else:
-            raise ValueError("cabeçalho Matrix Market sem dimensões")
+            raise ValueError("Matrix Market header has no dimensions")
 
-        if len(dimensoes) == 1:
-            n_linhas = n_colunas = int(dimensoes[0])
-        elif len(dimensoes) >= 2:
-            n_linhas, n_colunas = map(int, dimensoes[:2])
+        if len(dimensions) == 1:
+            n_rows = n_columns = int(dimensions[0])
+        elif len(dimensions) >= 2:
+            n_rows, n_columns = map(int, dimensions[:2])
         else:
-            raise ValueError("dimensões inválidas no cabeçalho Matrix Market")
+            raise ValueError("invalid dimensions in Matrix Market header")
 
-        entradas_reais = sum(
+        actual_entries = sum(
             1
-            for linha in arquivo
-            if linha.strip() and not linha.lstrip().startswith("%")
+            for line in file
+            if line.strip() and not line.lstrip().startswith("%")
         )
 
-    cabecalho_correto = f"{n_linhas} {n_colunas} {entradas_reais}"
-    if len(dimensoes) >= 3 and dimensoes[:3] == cabecalho_correto.split():
-        return scipy.io.mmread(caminho_mtx, spmatrix=True)
+    corrected_header = f"{n_rows} {n_columns} {actual_entries}"
+    if len(dimensions) >= 3 and dimensions[:3] == corrected_header.split():
+        return scipy.io.mmread(mtx_path, spmatrix=True)
 
-    cabecalho_original = " ".join(dimensoes)
+    original_header = " ".join(dimensions)
     print(
-        f"CORRIGINDO cabeçalho de {caminho_mtx.name}: "
-        f"'{cabecalho_original}' -> '{cabecalho_correto}'"
+        f"CORRECTING header for {mtx_path.name}: "
+        f"'{original_header}' -> '{corrected_header}'"
     )
 
-    caminho_temporario: Path | None = None
+    temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".mtx", delete=False
-        ) as temporario, caminho_mtx.open("r", encoding="utf-8") as origem:
-            caminho_temporario = Path(temporario.name)
-            for numero_linha, linha in enumerate(origem, start=1):
-                if numero_linha == numero_linha_dimensoes:
-                    temporario.write(f"{cabecalho_correto}\n")
+        ) as temporary, mtx_path.open("r", encoding="utf-8") as source:
+            temporary_path = Path(temporary.name)
+            for line_number, line in enumerate(source, start=1):
+                if line_number == dimensions_line_number:
+                    temporary.write(f"{corrected_header}\n")
                 else:
-                    temporario.write(linha)
+                    temporary.write(line)
 
-        return scipy.io.mmread(caminho_temporario, spmatrix=True)
+        return scipy.io.mmread(temporary_path, spmatrix=True)
     finally:
-        if caminho_temporario is not None:
-            caminho_temporario.unlink(missing_ok=True)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
-def converter_arquivo(caminho_mtx: Path, pasta_saida: Path) -> bool:
-    """Converte uma matriz quadrada e simétrica em um grafo não direcionado."""
-    caminho_col = pasta_saida / f"{caminho_mtx.stem}.col"
+def convert_file(
+    mtx_path: Path, output_directory: Path, remove_isolated: bool = False
+) -> bool:
+    """Convert a square symmetric matrix to an undirected graph."""
+    col_path = output_directory / f"{mtx_path.stem}.col"
 
     try:
-        matriz = ler_matriz(caminho_mtx)
+        matrix = read_matrix(mtx_path)
     except Exception as error:
-        print(f"FALHOU ao ler {caminho_mtx}: {error}")
+        print(f"FAILED to read {mtx_path}: {error}")
         return False
 
-    n_linhas, n_colunas = matriz.shape
-    if n_linhas != n_colunas:
+    n_rows, n_columns = matrix.shape
+    if n_rows != n_columns:
         print(
-            f"PULADO {caminho_mtx.stem}: matriz não quadrada "
-            f"({n_linhas}x{n_colunas}), não representa um grafo"
+            f"SKIPPED {mtx_path.stem}: non-square matrix "
+            f"({n_rows}x{n_columns}), does not represent a graph"
         )
         return False
 
-    matriz_csr = scipy.sparse.csr_matrix(matriz)
-    matriz_csr.eliminate_zeros()
+    csr_matrix = scipy.sparse.csr_matrix(matrix)
+    csr_matrix.eliminate_zeros()
 
-    if (matriz_csr != matriz_csr.transpose()).nnz != 0:
+    if (csr_matrix != csr_matrix.transpose()).nnz != 0:
         print(
-            f"PULADO {caminho_mtx.stem}: matriz não simétrica, "
-            "não representa um grafo não direcionado"
+            f"SKIPPED {mtx_path.stem}: asymmetric matrix, "
+            "does not represent an undirected graph"
         )
         return False
 
-    matriz_coo = matriz_csr.tocoo()
-    arestas: set[tuple[int, int]] = set()
+    csr_matrix.setdiag(0)
+    csr_matrix.eliminate_zeros()
+    if remove_isolated and (csr_matrix.getnnz(axis=1) == 0).any():
+        col_path.unlink(missing_ok=True)
+        print(f"REMOVED/SKIPPED: {mtx_path.name}: isolated vertices")
+        return False
 
-    for linha, coluna, valor in zip(
-        matriz_coo.row, matriz_coo.col, matriz_coo.data
+    coo_matrix = csr_matrix.tocoo()
+    edges: set[tuple[int, int]] = set()
+
+    for line, column, value in zip(
+        coo_matrix.row, coo_matrix.col, coo_matrix.data
     ):
-        if linha == coluna or valor == 0:
+        if line == column or value == 0:
             continue
 
-        u, v = sorted((int(linha) + 1, int(coluna) + 1))
-        arestas.add((u, v))
+        u, v = sorted((int(line) + 1, int(column) + 1))
+        edges.add((u, v))
 
-    pasta_saida.mkdir(parents=True, exist_ok=True)
-    with caminho_col.open("w", encoding="utf-8", newline="\n") as arquivo:
-        arquivo.write(
-            f"c Convertido automaticamente de {caminho_mtx.name}\n"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    with col_path.open("w", encoding="utf-8", newline="\n") as file:
+        file.write(
+            f"c Automatically converted from {mtx_path.name}\n"
         )
-        arquivo.write(f"p edge {n_linhas} {len(arestas)}\n")
-        for u, v in sorted(arestas):
-            arquivo.write(f"e {u} {v}\n")
+        file.write(f"p edge {n_rows} {len(edges)}\n")
+        for u, v in sorted(edges):
+            file.write(f"e {u} {v}\n")
 
     print(
-        f"OK: {caminho_mtx.stem} -> {n_linhas} vértices, "
-        f"{len(arestas)} arestas -> {caminho_col}"
+        f"OK: {mtx_path.stem} -> {n_rows} vertices, "
+        f"{len(edges)} edges -> {col_path}"
     )
     return True
 
 
-def encontrar_matrizes(entrada: Path) -> list[Path]:
-    """Retorna recursivamente os arquivos .mtx presentes na entrada."""
-    if entrada.is_dir():
-        return sorted(entrada.rglob("*.mtx"))
-    if entrada.is_file() and entrada.suffix.lower() == ".mtx":
-        return [entrada]
-    raise ValueError(f"A entrada deve ser um arquivo .mtx ou uma pasta: {entrada}")
+def find_matrices(input_path: Path) -> list[Path]:
+    """Recursively find .mtx files in the input path."""
+    if input_path.is_dir():
+        return sorted(input_path.rglob("*.mtx"))
+    if input_path.is_file() and input_path.suffix.lower() == ".mtx":
+        return [input_path]
+    raise ValueError(f"Input must be an .mtx file or a directory: {input_path}")
 
 
-def encontrar_bases(datasets: Path) -> list[tuple[Path, Path]]:
-    """Encontra os diretórios raw e processed de todas as bases."""
+def find_datasets(datasets: Path) -> list[tuple[Path, Path]]:
+    """Find raw and processed directories for all datasets."""
     return [
         (raw, raw.parent / "processed")
         for raw in sorted(datasets.glob("*/raw"))
@@ -143,59 +152,71 @@ def encontrar_bases(datasets: Path) -> list[tuple[Path, Path]]:
     ]
 
 
-def converter_base(entrada: Path, pasta_saida: Path) -> tuple[int, int]:
-    """Converte todos os arquivos Matrix Market de uma base."""
-    matrizes = encontrar_matrizes(entrada)
-    if not matrizes:
-        print(f"Nenhum arquivo .mtx encontrado em {entrada}")
+def convert_dataset(
+    input_path: Path, output_directory: Path, remove_isolated: bool = False
+) -> tuple[int, int]:
+    """Convert all Matrix Market files in a dataset."""
+    matrices = find_matrices(input_path)
+    if not matrices:
+        print(f"No .mtx files found in {input_path}")
         return 0, 0
 
-    print(f"Convertendo {len(matrizes)} matrizes de {entrada} para {pasta_saida}")
-    convertidas = sum(
-        converter_arquivo(caminho, pasta_saida) for caminho in matrizes
+    names: set[str] = set()
+    for path in matrices:
+        if path.stem in names:
+            raise ValueError(f"Multiple matrices would overwrite {path.stem}.col")
+        names.add(path.stem)
+
+    print(f"Converting {len(matrices)} matrices from {input_path} to {output_directory}")
+    converted = sum(
+        convert_file(file_path, output_directory, remove_isolated) for file_path in matrices
     )
-    return convertidas, len(matrizes)
+    return converted, len(matrices)
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("input", nargs="?", type=Path, help="Matrix Market file or directory")
+    parser.add_argument(
+        "--remove-isolated", action="store_true",
+        help="Discard the entire output graph if any vertex has no non-loop edge",
+    )
+    args = parser.parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
+            "PROJECT_ROOT is not set. Run this script through mise or "
+            "set the environment variable explicitly."
         )
 
     datasets = Path(project_root) / "datasets"
-    if len(sys.argv) > 2:
-        raise ValueError("Uso: python matrix_market.py [arquivo.mtx | pasta_com_mtx]")
-
-    if len(sys.argv) == 2:
-        entrada = Path(sys.argv[1])
-        pasta_base = entrada if entrada.is_dir() else entrada.parent
-        pasta_saida = (
-            pasta_base.parent / "processed"
-            if pasta_base.name == "raw"
-            else pasta_base / "processed"
+    if args.input is not None:
+        input_path = args.input
+        base_directory = input_path if input_path.is_dir() else input_path.parent
+        output_directory = (
+            base_directory.parent / "processed"
+            if base_directory.name == "raw"
+            else base_directory / "processed"
         )
-        bases = [(entrada, pasta_saida)]
+        datasets_to_convert = [(input_path, output_directory)]
     else:
-        bases = encontrar_bases(datasets)
+        datasets_to_convert = find_datasets(datasets)
 
-    if not bases:
-        raise RuntimeError(f"Nenhuma base com diretório raw encontrada em {datasets}")
+    if not datasets_to_convert:
+        raise RuntimeError(f"No dataset with a raw directory found in {datasets}")
 
-    total_convertidas = 0
-    total_matrizes = 0
-    for entrada, pasta_saida in bases:
-        convertidas, encontradas = converter_base(entrada, pasta_saida)
-        total_convertidas += convertidas
-        total_matrizes += encontradas
+    total_converted = 0
+    total_matrices = 0
+    for input_path, output_directory in datasets_to_convert:
+        converted, found = convert_dataset(input_path, output_directory, args.remove_isolated)
+        total_converted += converted
+        total_matrices += found
 
-    if total_matrizes == 0:
-        raise RuntimeError("Nenhum arquivo .mtx foi encontrado nas bases de dados.")
+    if total_matrices == 0:
+        raise RuntimeError("No .mtx files were found in the datasets.")
 
     print(
-        f"Concluído: {total_convertidas} de {total_matrizes} matrizes convertidas."
+        f"Completed: {total_converted} of {total_matrices} matrices converted."
     )
 
 

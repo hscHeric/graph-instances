@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Baixa a coleção DIMACS hospedada no Network Repository."""
+"""Download the DIMACS collection hosted by Network Repository."""
 
 from __future__ import annotations
 
+import argparse
 import io
+import filecmp
 import os
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -48,36 +50,36 @@ HEADERS = {
 }
 
 
-def tentar_download(url: str, destino: Path) -> bool:
-    """Baixa e extrai um ZIP válido no diretório de destino."""
-    resposta = requests.get(url, headers=HEADERS, timeout=60)
-    if resposta.status_code != 200 or not resposta.content.startswith(b"PK"):
+def try_download(url: str, destination: Path) -> bool:
+    """Download and extract a valid ZIP into the destination directory."""
+    response = requests.get(url, headers=HEADERS, timeout=60)
+    if response.status_code != 200 or not response.content.startswith(b"PK"):
         return False
 
-    with zipfile.ZipFile(io.BytesIO(resposta.content)) as arquivo_zip:
-        arquivo_zip.extractall(destino)
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zip_file:
+        zip_file.extractall(destination)
     return True
 
 
-def baixar_e_extrair(nome: str, destino: Path) -> bool:
-    """Tenta baixar uma instância usando diferentes capitalizações."""
-    destino_instancia = destino / ".downloads" / nome
-    destino_instancia.mkdir(parents=True, exist_ok=True)
-    candidatos = list(dict.fromkeys((nome, nome.lower(), nome.upper())))
-    for candidato in candidatos:
-        url = f"{BASE_URL}/{candidato}.zip"
+def download_and_extract(name: str, destination: Path) -> bool:
+    """Try downloading an instance using different capitalizations."""
+    instance_destination = destination / ".downloads" / name
+    instance_destination.mkdir(parents=True, exist_ok=True)
+    candidates = list(dict.fromkeys((name, name.lower(), name.upper())))
+    for candidate in candidates:
+        url = f"{BASE_URL}/{candidate}.zip"
         try:
-            if tentar_download(url, destino_instancia):
+            if try_download(url, instance_destination):
                 return True
         except (requests.RequestException, zipfile.BadZipFile, OSError) as error:
-            print(f"  Erro ao tentar {url}: {error}")
+            print(f"  Error trying {url}: {error}")
 
-    print(f"  Nenhuma variação de nome funcionou para {nome}: {candidatos}")
+    print(f"  No name variant worked for {name}: {candidates}")
     return False
 
 
-def mover_arquivos_para_raiz(destination: Path) -> int:
-    """Descarta readmes e move os demais arquivos para a raiz de raw."""
+def move_files_to_root(destination: Path) -> int:
+    """Discard readmes and move other files to the raw directory root."""
     moved_files = 0
     for source in destination.rglob("*"):
         if source.is_dir():
@@ -92,8 +94,11 @@ def mover_arquivos_para_raiz(destination: Path) -> int:
 
         target = destination / source.name
         if target.exists():
+            if filecmp.cmp(source, target, shallow=False):
+                source.unlink()
+                continue
             raise FileExistsError(
-                f"Não foi possível mover {source}: o arquivo {target} já existe."
+                f"Could not move {source}: file {target} already exists."
             )
         move(source, target)
         moved_files += 1
@@ -113,11 +118,12 @@ def mover_arquivos_para_raiz(destination: Path) -> int:
 
 
 def main() -> None:
+    argparse.ArgumentParser(description=__doc__).parse_args()
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
-            "PROJECT_ROOT não está definida. Execute este script pelo mise ou "
-            "defina a variável de ambiente explicitamente."
+            "PROJECT_ROOT is not set. Run this script through mise or "
+            "set the environment variable explicitly."
         )
 
     destination = Path(project_root) / "datasets" / "dimacs" / "raw"
@@ -127,36 +133,37 @@ def main() -> None:
         workers = int(os.environ.get("DIMACS_DOWNLOAD_WORKERS", "78"))
     except ValueError as error:
         raise ValueError(
-            "DIMACS_DOWNLOAD_WORKERS deve ser um número inteiro."
+            "DIMACS_DOWNLOAD_WORKERS must be an integer."
         ) from error
     if workers < 1:
-        raise ValueError("DIMACS_DOWNLOAD_WORKERS deve ser maior ou igual a 1.")
+        raise ValueError("DIMACS_DOWNLOAD_WORKERS must be at least 1.")
 
     print(
-        f"Baixando {len(DIMACS_INSTANCES)} instâncias para {destination} "
-        f"com {workers} downloads simultâneos"
+        f"Downloading {len(DIMACS_INSTANCES)} instances to {destination} "
+        f"with {workers} concurrent downloads"
     )
-    falhas: list[str] = []
+    failures: list[str] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         downloads = {
-            executor.submit(baixar_e_extrair, nome, destination): nome
-            for nome in DIMACS_INSTANCES
+            executor.submit(download_and_extract, name, destination): name
+            for name in DIMACS_INSTANCES
         }
-        for concluido, future in enumerate(as_completed(downloads), start=1):
-            nome = downloads[future]
-            sucesso = future.result()
+        for completed, future in enumerate(as_completed(downloads), start=1):
+            name = downloads[future]
+            success = future.result()
             print(
-                f"  [{concluido}/{len(DIMACS_INSTANCES)}] "
-                f"{'OK' if sucesso else 'FALHOU'}: {nome}"
+                f"  [{completed}/{len(DIMACS_INSTANCES)}] "
+                f"{'OK' if success else 'FAILED'}: {name}"
             )
-            if not sucesso:
-                falhas.append(nome)
+            if not success:
+                failures.append(name)
 
-    moved_files = mover_arquivos_para_raiz(destination)
-    print(f"{moved_files} arquivos movidos para {destination}")
+    moved_files = move_files_to_root(destination)
+    print(f"{moved_files} files moved to {destination}")
 
-    if falhas:
-        print(f"{len(falhas)} instâncias falharam: {', '.join(falhas)}")
+    if failures:
+        print(f"{len(failures)} instances failed: {', '.join(failures)}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

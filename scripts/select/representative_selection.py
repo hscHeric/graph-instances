@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Seleciona grafos representativos com isolamento de memória e retomada."""
+"""Select representative graphs with memory isolation and resumable processing."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+from contextlib import closing
 import math
 import multiprocessing as mp
 import os
@@ -23,217 +24,236 @@ from sklearn.preprocessing import StandardScaler
 
 FEATURES = [
     "n_vertices",
-    "n_arestas",
-    "densidade",
-    "grau_minimo",
-    "grau_maximo",
-    "grau_medio",
-    "grau_mediana",
-    "grau_desvio",
-    "entropia_grau",
-    "clustering_medio",
-    "transitividade",
-    "assortatividade",
-    "num_componentes",
-    "frac_maior_componente",
-    "diametro_aprox",
-    "caminho_medio_aprox",
+    "n_edges",
+    "density",
+    "minimum_degree",
+    "maximum_degree",
+    "mean_degree",
+    "median_degree",
+    "degree_std",
+    "degree_entropy",
+    "mean_clustering",
+    "transitivity",
+    "assortativity",
+    "component_count",
+    "largest_component_fraction",
+    "approximate_diameter",
+    "approximate_average_path_length",
 ]
 
-FEATURES_INTEIRAS = {
+INTEGER_FEATURES = {
     "n_vertices",
-    "n_arestas",
-    "grau_minimo",
-    "grau_maximo",
-    "num_componentes",
+    "n_edges",
+    "minimum_degree",
+    "maximum_degree",
+    "component_count",
 }
 
 
-def formatar_feature_para_csv(feature: str, valor: float) -> int | str:
-    """Preserva contagens como inteiros e floats com seis casas decimais."""
-    if feature in FEATURES_INTEIRAS:
-        return int(valor)
-    return f"{float(valor):.6f}"
+def format_feature_for_csv(feature: str, value: float) -> int | str:
+    """Keep counts as integers and format floats with six decimal places."""
+    if feature in INTEGER_FEATURES:
+        return int(value)
+    return f"{float(value):.6f}"
 
 
-def ler_cabecalho_dimacs(caminho: Path) -> tuple[int, int] | None:
-    """Lê somente `p edge n m`, sem carregar o grafo."""
-    with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
-        for linha in arquivo:
-            if linha.startswith("p "):
-                partes = linha.split()
-                if len(partes) < 4:
+def read_dimacs_header(file_path: Path) -> tuple[int, int] | None:
+    """Read only `p edge n m` without loading the graph."""
+    with file_path.open("r", encoding="utf-8", errors="replace") as file:
+        for line in file:
+            if line.startswith("p "):
+                parts = line.split()
+                if len(parts) < 4:
                     return None
-                return int(partes[2]), int(partes[3])
+                try:
+                    return int(parts[2]), int(parts[3])
+                except ValueError:
+                    return None
     return None
 
 
-def ler_dimacs_col(caminho: Path) -> nx.Graph:
-    """Lê um grafo simples no formato DIMACS .col."""
-    grafo = nx.Graph()
-    with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
-        for numero_linha, linha in enumerate(arquivo, start=1):
-            texto = linha.strip()
-            if not texto or texto.startswith("c"):
+def read_dimacs_col(file_path: Path) -> nx.Graph:
+    """Read a simple graph in DIMACS .col format."""
+    graph = nx.Graph()
+    vertex_count: int | None = None
+    edge_count = 0
+    with file_path.open("r", encoding="utf-8", errors="replace") as file:
+        for line_number, line in enumerate(file, start=1):
+            text = line.strip()
+            if not text or text.split()[0] == "c":
                 continue
-            partes = texto.split()
+            parts = text.split()
             try:
-                if partes[0] == "p":
-                    grafo.add_nodes_from(range(1, int(partes[2]) + 1))
-                elif partes[0] == "e":
-                    grafo.add_edge(int(partes[1]), int(partes[2]))
-            except (IndexError, ValueError) as erro:
+                if parts[0] == "p":
+                    if vertex_count is not None or len(parts) != 4 or parts[1] != "edge":
+                        raise ValueError("expected one 'p edge n m' header")
+                    vertex_count, edge_count = map(int, parts[2:])
+                    if vertex_count < 0 or edge_count < 0:
+                        raise ValueError("negative graph size")
+                    graph.add_nodes_from(range(1, vertex_count + 1))
+                elif parts[0] == "e":
+                    if vertex_count is None or len(parts) != 3:
+                        raise ValueError("edge before header or malformed edge")
+                    u, v = map(int, parts[1:])
+                    if not (1 <= u <= vertex_count and 1 <= v <= vertex_count):
+                        raise ValueError("vertex ID outside 1..n")
+                    if u == v or graph.has_edge(u, v):
+                        raise ValueError("loop or duplicate undirected edge")
+                    graph.add_edge(u, v)
+                else:
+                    raise ValueError("unknown DIMACS record")
+            except (IndexError, ValueError) as error:
                 raise ValueError(
-                    f"linha DIMACS inválida em {caminho}:{numero_linha}: {texto}"
-                ) from erro
-    return grafo
+                    f"invalid DIMACS line at {file_path}:{line_number}: {text}"
+                ) from error
+    if vertex_count is None or graph.number_of_edges() != edge_count:
+        raise ValueError(f"{file_path}: missing header or edge count mismatch")
+    return graph
 
 
-def diametro_e_caminho_aproximados(
-    grafo: nx.Graph, numero_amostras: int, seed: int
+def approximate_diameter_and_path_length(
+    graph: nx.Graph, sample_count: int, seed: int
 ) -> tuple[float, float]:
-    """Aproxima diâmetro e caminho médio por BFS na maior componente."""
-    if grafo.number_of_nodes() == 0:
+    """Approximate diameter and average path length using BFS in the largest component."""
+    if graph.number_of_nodes() == 0:
         return 0.0, 0.0
 
-    maior_componente = max(nx.connected_components(grafo), key=len)
-    subgrafo = grafo.subgraph(maior_componente)
+    largest_component = max(nx.connected_components(graph), key=len)
+    subgraph = graph.subgraph(largest_component)
     rng = random.Random(seed)
-    amostras: list[int] = []
-    for indice, vertice in enumerate(subgrafo):
-        if indice < numero_amostras:
-            amostras.append(vertice)
+    samples: list[int] = []
+    for index, vertex in enumerate(subgraph):
+        if index < sample_count:
+            samples.append(vertex)
             continue
-        substituto = rng.randrange(indice + 1)
-        if substituto < numero_amostras:
-            amostras[substituto] = vertice
+        replacement = rng.randrange(index + 1)
+        if replacement < sample_count:
+            samples[replacement] = vertex
 
-    excentricidades: list[int] = []
-    caminhos_medios: list[float] = []
-    for origem in amostras:
-        maior_distancia = 0
-        soma_distancias = 0
-        quantidade = 0
-        for distancia in nx.single_source_shortest_path_length(subgrafo, origem).values():
-            maior_distancia = max(maior_distancia, distancia)
-            soma_distancias += distancia
-            quantidade += 1
-        excentricidades.append(maior_distancia)
-        caminhos_medios.append(soma_distancias / quantidade)
+    eccentricities: list[int] = []
+    average_path_lengths: list[float] = []
+    for source in samples:
+        maximum_distance = 0
+        distance_sum = 0
+        count = 0
+        for distance in nx.single_source_shortest_path_length(subgraph, source).values():
+            maximum_distance = max(maximum_distance, distance)
+            distance_sum += distance
+            count += 1
+        eccentricities.append(maximum_distance)
+        average_path_lengths.append(distance_sum / (count - 1) if count > 1 else 0.0)
 
-    return float(max(excentricidades)), float(np.mean(caminhos_medios))
+    return float(max(eccentricities)), float(np.mean(average_path_lengths))
 
 
-def entropia_graus(graus: list[int]) -> float:
-    if not graus:
+def degree_entropy(degrees: list[int]) -> float:
+    if not degrees:
         return 0.0
-    _, contagens = np.unique(graus, return_counts=True)
-    probabilidades = contagens / contagens.sum()
-    return float(-np.sum(probabilidades * np.log2(probabilidades)))
+    _, counts = np.unique(degrees, return_counts=True)
+    probabilities = counts / counts.sum()
+    return float(-np.sum(probabilities * np.log2(probabilities)))
 
 
-def extrair_features(grafo: nx.Graph, bfs_samples: int, seed: int) -> dict[str, float]:
-    """Extrai características estruturais topológicas do grafo."""
-    n = grafo.number_of_nodes()
-    m = grafo.number_of_edges()
-    graus = [grau for _, grau in grafo.degree()]
+def extract_features(graph: nx.Graph, bfs_samples: int, seed: int) -> dict[str, float]:
+    """Extract structural topological features from the graph."""
+    n = graph.number_of_nodes()
+    m = graph.number_of_edges()
+    degrees = [degree for _, degree in graph.degree()]
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            assortatividade = nx.degree_assortativity_coefficient(grafo)
-        if assortatividade is None or math.isnan(assortatividade):
-            assortatividade = 0.0
+            assortativity = nx.degree_assortativity_coefficient(graph)
+        if assortativity is None or math.isnan(assortativity):
+            assortativity = 0.0
     except Exception:
-        assortatividade = 0.0
+        assortativity = 0.0
 
-    numero_componentes = 0
-    tamanho_maior_componente = 0
-    for componente in nx.connected_components(grafo):
-        numero_componentes += 1
-        tamanho_maior_componente = max(tamanho_maior_componente, len(componente))
-    diametro, caminho_medio = diametro_e_caminho_aproximados(
-        grafo, bfs_samples, seed
+    component_count = 0
+    largest_component_size = 0
+    for component in nx.connected_components(graph):
+        component_count += 1
+        largest_component_size = max(largest_component_size, len(component))
+    diameter, average_path_length = approximate_diameter_and_path_length(
+        graph, bfs_samples, seed
     )
     return {
         "n_vertices": n,
-        "n_arestas": m,
-        "densidade": nx.density(grafo),
-        "grau_minimo": min(graus, default=0),
-        "grau_maximo": max(graus, default=0),
-        "grau_medio": float(np.mean(graus)) if graus else 0.0,
-        "grau_mediana": float(np.median(graus)) if graus else 0.0,
-        "grau_desvio": float(np.std(graus)) if graus else 0.0,
-        "entropia_grau": entropia_graus(graus),
-        "clustering_medio": nx.average_clustering(grafo),
-        "transitividade": nx.transitivity(grafo),
-        "assortatividade": float(assortatividade),
-        "num_componentes": numero_componentes,
-        "frac_maior_componente": tamanho_maior_componente / n if n else 0.0,
-        "diametro_aprox": diametro,
-        "caminho_medio_aprox": caminho_medio,
+        "n_edges": m,
+        "density": nx.density(graph),
+        "minimum_degree": min(degrees, default=0),
+        "maximum_degree": max(degrees, default=0),
+        "mean_degree": float(np.mean(degrees)) if degrees else 0.0,
+        "median_degree": float(np.median(degrees)) if degrees else 0.0,
+        "degree_std": float(np.std(degrees)) if degrees else 0.0,
+        "degree_entropy": degree_entropy(degrees),
+        "mean_clustering": nx.average_clustering(graph) if n else 0.0,
+        "transitivity": nx.transitivity(graph),
+        "assortativity": float(assortativity),
+        "component_count": component_count,
+        "largest_component_fraction": largest_component_size / n if n else 0.0,
+        "approximate_diameter": diameter,
+        "approximate_average_path_length": average_path_length,
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Seleciona grafos DIMACS representativos por clustering de "
-            "características estruturais, com isolamento de memória e retomada"
+            "Select representative DIMACS graphs by clustering "
+            "structural features, with memory isolation and resumable processing"
         )
     )
     parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--n", type=int, required=True)
+    parser.add_argument("--n", "--count", type=int, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--bfs-samples", type=int, default=10)
     parser.add_argument("--csv", type=Path)
-    parser.add_argument("--db-name", help="Nome da base dentro de datasets/")
-    parser.add_argument("--db", type=Path, help="Caminho explícito do banco SQLite")
+    parser.add_argument("--db-name", help="Dataset name within datasets/")
+    parser.add_argument("--db", type=Path, help="Explicit SQLite database path")
     parser.add_argument(
         "--max-vertices",
         type=int,
         default=500_000,
-        help="Pula grafos acima deste número de vértices; use 0 para desativar",
+        help="Skip graphs above this vertex count; use 0 to disable",
     )
     parser.add_argument(
         "--memory-limit-mb",
-        "--limite-memoria-mb",
         dest="memory_limit_mb",
         type=int,
         default=4096,
-        help="Limite de memória por subprocesso em MB; padrão: 4096",
+        help="Memory limit per subprocess in MB; default: 4096",
     )
     parser.add_argument(
         "--timeout-s",
         type=float,
         default=21_600,
-        help="Tempo máximo por grafo; padrão: 21600 segundos (6 horas)",
+        help="Time limit per graph; default: 21600 seconds (6 hours)",
     )
     parser.add_argument(
-        "--ignorar-sem-arestas",
+        "--skip-edgeless",
         action="store_true",
         help=(
-            "Ignora grafos com zero vértices, zero arestas ou somente "
-            "vértices isolados"
+            "Skip graphs with zero vertices, zero edges, or only "
+            "isolated vertices"
         ),
     )
     parser.add_argument(
-        "--usar-todos-se-faltar",
+        "--use-all-if-fewer",
         action="store_true",
-        help="Seleciona todos os disponíveis quando a base tiver menos que --n",
+        help="Select all available graphs when the dataset contains fewer than --n",
     )
     parser.add_argument(
         "--only-select",
-        "--so-selecionar",
         dest="only_select",
         action="store_true",
-        help="Usa os dados já persistidos no banco sem calcular novos grafos",
+        help="Use stored database features without processing new graphs",
     )
     return parser.parse_args()
 
 
-def resolver_caminho_banco(args: argparse.Namespace) -> Path:
+def resolve_database_path(args: argparse.Namespace) -> Path:
     if args.db is not None:
         args.db.parent.mkdir(parents=True, exist_ok=True)
         return args.db
@@ -241,163 +261,177 @@ def resolver_caminho_banco(args: argparse.Namespace) -> Path:
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
         raise RuntimeError(
-            "PROJECT_ROOT não está definida; execute pelo mise ou passe --db"
+            "PROJECT_ROOT is not set; run through mise or pass --db"
         )
-    nome_base = args.db_name or args.input_dir.parent.name
-    destino = Path(project_root) / "datasets" / nome_base
-    destino.mkdir(parents=True, exist_ok=True)
-    return destino / "features.sqlite3"
+    dataset_name = args.db_name or args.input_dir.parent.name
+    destination = Path(project_root) / "datasets" / dataset_name
+    destination.mkdir(parents=True, exist_ok=True)
+    return destination / "features.sqlite3"
 
 
-def possui_vertices_e_arestas(caminho: Path) -> bool:
-    """Verifica pelo cabeçalho DIMACS se há vértices e alguma aresta."""
-    with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
-        for linha in arquivo:
-            if linha.startswith("p "):
-                partes = linha.split()
-                if len(partes) < 4:
-                    return False
-                return int(partes[2]) > 0 and int(partes[3]) > 0
-    return False
+def has_vertices_and_edges(file_path: Path) -> bool:
+    """Check the DIMACS header for vertices and at least one edge."""
+    header = read_dimacs_header(file_path)
+    return bool(header and header[0] > 0 and header[1] > 0)
 
 
-def quantidade_selecionada(output: Path) -> int:
-    """Conta somente os grafos DIMACS presentes na pasta selected."""
-    if not output.exists():
-        return 0
-    return sum(1 for _ in output.glob("*.col"))
-
-
-def selecao_ja_completa(output: Path, quantidade: int) -> bool:
-    atual = quantidade_selecionada(output)
-    if atual != quantidade:
-        return False
-    print(
-        f"Seleção já concluída: {atual} grafo(s) em {output}; "
-        "nenhum processamento necessário."
-    )
-    return True
-
-
-def salvar_csv(
-    caminho: Path,
-    nomes: list[str],
-    matriz: np.ndarray,
+def save_csv(
+    file_path: Path,
+    names: list[str],
+    matrix: np.ndarray,
     clusters: np.ndarray,
-    selecionados: list[int],
+    selected: list[int],
 ) -> None:
-    caminho.parent.mkdir(parents=True, exist_ok=True)
-    with caminho.open("w", encoding="utf-8", newline="") as arquivo:
-        escritor = csv.DictWriter(
-            arquivo, fieldnames=["arquivo", "cluster", "selecionado", *FEATURES]
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(
+            file, fieldnames=["file", "cluster", "selected", *FEATURES]
         )
-        escritor.writeheader()
-        for indice, nome in enumerate(nomes):
-            escritor.writerow(
+        writer.writeheader()
+        for index, name in enumerate(names):
+            writer.writerow(
                 {
-                    "arquivo": nome,
-                    "cluster": int(clusters[indice]),
-                    "selecionado": indice in selecionados,
+                    "file": name,
+                    "cluster": int(clusters[index]),
+                    "selected": index in selected,
                     **{
-                        feature: formatar_feature_para_csv(
-                            feature, matriz[indice, coluna]
+                        feature: format_feature_for_csv(
+                            feature, matrix[index, column]
                         )
-                        for coluna, feature in enumerate(FEATURES)
+                        for column, feature in enumerate(FEATURES)
                     },
                 }
             )
 
 
 def _worker(
-    caminho: str,
+    file_path: str,
     bfs_samples: int,
     seed: int,
-    limite_bytes: int,
-    transmissor,
+    limit_bytes: int,
+    sender,
 ) -> None:
-    """Calcula um grafo em subprocesso limitado e devolve um resultado pequeno."""
+    """Process a graph in a limited subprocess and return a small result."""
     try:
-        if limite_bytes > 0:
-            resource.setrlimit(resource.RLIMIT_AS, (limite_bytes, limite_bytes))
+        if limit_bytes > 0:
+            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
     except (ValueError, OSError):
         pass
 
     try:
-        grafo = ler_dimacs_col(Path(caminho))
-        transmissor.send((True, extrair_features(grafo, bfs_samples, seed)))
+        graph = read_dimacs_col(Path(file_path))
+        sender.send((True, extract_features(graph, bfs_samples, seed)))
     except MemoryError:
-        transmissor.send((False, "memória insuficiente"))
-    except Exception as erro:
-        transmissor.send((False, f"{type(erro).__name__}: {erro}"))
+        sender.send((False, "insufficient memory"))
+    except Exception as error:
+        sender.send((False, f"{type(error).__name__}: {error}"))
     finally:
-        transmissor.close()
+        sender.close()
 
 
-def calcular_features_isolado(
-    caminho: Path,
+def compute_features_in_subprocess(
+    file_path: Path,
     bfs_samples: int,
     seed: int,
-    limite_bytes: int,
+    limit_bytes: int,
     timeout_s: float,
 ) -> tuple[bool, dict | str]:
-    """Executa um worker descartável, sobrevivendo a timeout, crash ou OOM."""
-    contexto = mp.get_context("fork")
-    receptor, transmissor = contexto.Pipe(duplex=False)
-    processo = contexto.Process(
+    """Run a disposable worker, surviving timeout, crash, or OOM."""
+    context = mp.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
         target=_worker,
-        args=(str(caminho), bfs_samples, seed, limite_bytes, transmissor),
+        args=(str(file_path), bfs_samples, seed, limit_bytes, sender),
     )
-    processo.start()
-    transmissor.close()
-    processo.join(timeout_s if timeout_s > 0 else None)
+    process.start()
+    sender.close()
+    process.join(timeout_s if timeout_s > 0 else None)
 
-    if processo.is_alive():
-        processo.terminate()
-        processo.join(5)
-        if processo.is_alive():
-            processo.kill()
-            processo.join()
-        receptor.close()
-        return False, f"timeout após {timeout_s:.0f}s"
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        receiver.close()
+        return False, f"timeout after {timeout_s:.0f}s"
 
-    if receptor.poll(1):
-        resultado = receptor.recv()
-        receptor.close()
-        return resultado
-    receptor.close()
+    if receiver.poll(1):
+        try:
+            return receiver.recv()
+        except EOFError:
+            pass
+        finally:
+            receiver.close()
+    receiver.close()
     return (
         False,
-        f"processo terminou sem resultado (exitcode={processo.exitcode}; provável OOM)",
+        f"process exited without a result (exitcode={process.exitcode}; probable OOM)",
     )
 
 
-def preparar_banco(db_path: Path) -> sqlite3.Connection:
-    colunas = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
-    conexao = sqlite3.connect(db_path)
-    conexao.execute("PRAGMA journal_mode=WAL")
-    conexao.execute("PRAGMA synchronous=NORMAL")
-    conexao.execute(
+def prepare_database(db_path: Path) -> sqlite3.Connection:
+    columns = ", ".join(f'"{feature}" REAL NOT NULL' for feature in FEATURES)
+    connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=NORMAL")
+    # Upgrade databases created before the English naming convention.
+    legacy_columns = {
+        "arquivo": "file",
+        "motivo": "reason",
+        "n_arestas": "n_edges",
+        "densidade": "density",
+        "grau_minimo": "minimum_degree",
+        "grau_maximo": "maximum_degree",
+        "grau_medio": "mean_degree",
+        "grau_mediana": "median_degree",
+        "grau_desvio": "degree_std",
+        "entropia_grau": "degree_entropy",
+        "clustering_medio": "mean_clustering",
+        "transitividade": "transitivity",
+        "assortatividade": "assortativity",
+        "num_componentes": "component_count",
+        "frac_maior_componente": "largest_component_fraction",
+        "diametro_aprox": "approximate_diameter",
+        "caminho_medio_aprox": "approximate_average_path_length",
+    }
+    with connection:
+        for table in ("features", "failures"):
+            existing_columns = {
+                row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')
+            }
+            for old, new in legacy_columns.items():
+                if old in existing_columns:
+                    connection.execute(
+                        f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}"'
+                    )
+    connection.execute(
         f"CREATE TABLE IF NOT EXISTS features "
-        f"(arquivo TEXT PRIMARY KEY, {colunas})"
+        f"(file TEXT PRIMARY KEY, {columns})"
     )
-    conexao.execute(
+    connection.execute(
         "CREATE TABLE IF NOT EXISTS failures "
-        "(arquivo TEXT PRIMARY KEY, motivo TEXT NOT NULL)"
+        "(file TEXT PRIMARY KEY, reason TEXT NOT NULL)"
     )
-    conexao.commit()
-    return conexao
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS sources "
+        "(file TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER, "
+        "bfs_samples INTEGER, seed INTEGER, feature_version INTEGER)"
+    )
+    connection.commit()
+    return connection
 
 
-def ordenar_por_tamanho(arquivos: list[Path]) -> list[Path]:
-    """Ordena pelo número declarado de vértices sem carregar os grafos."""
+def sort_by_size(files: list[Path]) -> list[Path]:
+    """Sort by declared vertex count without loading graphs."""
     return sorted(
-        arquivos,
-        key=lambda caminho: (ler_cabecalho_dimacs(caminho) or (0, 0))[0],
+        files,
+        key=lambda file_path: (read_dimacs_header(file_path) or (0, 0))[0],
     )
 
 
-def calcular_e_persistir_features(
-    arquivos: list[Path],
+def compute_and_store_features(
+    files: list[Path],
     bfs_samples: int,
     seed: int,
     db_path: Path,
@@ -405,194 +439,213 @@ def calcular_e_persistir_features(
     memory_limit_mb: int,
     timeout_s: float,
 ) -> None:
-    """Retoma o banco e processa somente arquivos ainda desconhecidos."""
-    conexao = preparar_banco(db_path)
-    processados = {
-        registro[0] for registro in conexao.execute("SELECT arquivo FROM features")
+    """Reuse unchanged successful features and recompute changed or failed files."""
+    connection = prepare_database(db_path)
+    cached_sources = {
+        record[0]: tuple(record[1:])
+        for record in connection.execute(
+            "SELECT sources.* FROM sources JOIN features USING (file)"
+        )
     }
-    processados.update(
-        registro[0] for registro in conexao.execute("SELECT arquivo FROM failures")
-    )
-    pendentes = [
-        caminho for caminho in ordenar_por_tamanho(arquivos)
-        if caminho.name not in processados
+    fingerprints = {}
+    for path in files:
+        stat = path.stat()
+        fingerprints[path.name] = (stat.st_mtime_ns, stat.st_size, bfs_samples, seed, 2)
+    pending = [
+        file_path for file_path in sort_by_size(files)
+        if cached_sources.get(file_path.name) != fingerprints[file_path.name]
     ]
     print(
-        f"Banco persistente: {db_path} | concluídos: {len(processados)} | "
-        f"pendentes: {len(pendentes)}"
+        f"Persistent database: {db_path} | cached: {len(files) - len(pending)} | "
+        f"pending: {len(pending)}"
     )
 
     placeholders = ", ".join("?" for _ in range(1 + len(FEATURES)))
-    limite_bytes = memory_limit_mb * 1024 * 1024
-    for indice, caminho in enumerate(pendentes, start=1):
-        cabecalho = ler_cabecalho_dimacs(caminho)
-        if max_vertices > 0 and cabecalho and cabecalho[0] > max_vertices:
-            motivo = f"n={cabecalho[0]} excede max-vertices={max_vertices}"
-            conexao.execute(
+    limit_bytes = memory_limit_mb * 1024 * 1024
+    for index, file_path in enumerate(pending, start=1):
+        connection.execute("DELETE FROM features WHERE file = ?", (file_path.name,))
+        connection.execute("DELETE FROM failures WHERE file = ?", (file_path.name,))
+        connection.execute("DELETE FROM sources WHERE file = ?", (file_path.name,))
+        header = read_dimacs_header(file_path)
+        if max_vertices > 0 and header and header[0] > max_vertices:
+            reason = f"n={header[0]} exceeds max-vertices={max_vertices}"
+            connection.execute(
                 "INSERT OR REPLACE INTO failures VALUES (?, ?)",
-                (caminho.name, motivo),
+                (file_path.name, reason),
             )
-            conexao.commit()
-            print(f"[{indice}/{len(pendentes)}] {caminho.name}: PULADO ({motivo})")
+            connection.commit()
+            print(f"[{index}/{len(pending)}] {file_path.name}: SKIPPED ({reason})")
             continue
 
-        sucesso, resultado = calcular_features_isolado(
-            caminho, bfs_samples, seed, limite_bytes, timeout_s
+        success, result = compute_features_in_subprocess(
+            file_path, bfs_samples, seed, limit_bytes, timeout_s
         )
-        if sucesso:
-            conexao.execute(
+        if success:
+            connection.execute(
                 f"INSERT OR REPLACE INTO features VALUES ({placeholders})",
-                (caminho.name, *(resultado[feature] for feature in FEATURES)),
+                (file_path.name, *(result[feature] for feature in FEATURES)),
             )
-            conexao.commit()
+            connection.execute(
+                "INSERT OR REPLACE INTO sources VALUES (?, ?, ?, ?, ?, ?)",
+                (file_path.name, *fingerprints[file_path.name]),
+            )
+            connection.commit()
             print(
-                f"[{indice}/{len(pendentes)}] {caminho.name}: "
-                f"n={resultado['n_vertices']}, m={resultado['n_arestas']}, "
-                f"densidade={resultado['densidade']:.6f} [OK]"
+                f"[{index}/{len(pending)}] {file_path.name}: "
+                f"n={result['n_vertices']}, m={result['n_edges']}, "
+                f"density={result['density']:.6f} [OK]"
             )
         else:
-            conexao.execute(
+            connection.execute(
                 "INSERT OR REPLACE INTO failures VALUES (?, ?)",
-                (caminho.name, str(resultado)),
+                (file_path.name, str(result)),
             )
-            conexao.commit()
-            print(f"[{indice}/{len(pendentes)}] {caminho.name}: FALHOU ({resultado})")
-    conexao.close()
+            connection.commit()
+            print(f"[{index}/{len(pending)}] {file_path.name}: FAILED ({result})")
+    connection.close()
 
 
-def carregar_features(
-    banco_path: Path,
+def load_features(
+    database_path: Path,
 ) -> tuple[list[str], np.ndarray, list[tuple[str, str]]]:
-    """Carrega somente os registros bem-sucedidos para o k-means."""
-    colunas = ", ".join(f'"{feature}"' for feature in FEATURES)
-    with sqlite3.connect(banco_path) as conexao:
-        registros = conexao.execute(
-            f"SELECT arquivo, {colunas} FROM features ORDER BY arquivo"
+    """Load only successful records for k-means."""
+    columns = ", ".join(f'"{feature}"' for feature in FEATURES)
+    with closing(prepare_database(database_path)) as connection:
+        records = connection.execute(
+            f"SELECT file, {columns} FROM features ORDER BY file"
         ).fetchall()
-        falhas = conexao.execute(
-            "SELECT arquivo, motivo FROM failures ORDER BY arquivo"
+        failures = connection.execute(
+            "SELECT file, reason FROM failures ORDER BY file"
         ).fetchall()
-    nomes = [registro[0] for registro in registros]
-    matriz = np.asarray([registro[1:] for registro in registros], dtype=np.float64)
-    return nomes, matriz, falhas
+    names = [record[0] for record in records]
+    matrix = np.asarray([record[1:] for record in records], dtype=np.float64)
+    return names, matrix, failures
 
 
 def main() -> None:
     args = parse_args()
     if args.n < 1:
-        raise ValueError("n deve ser maior ou igual a 1")
+        raise ValueError("n must be at least 1")
     if args.bfs_samples < 1:
-        raise ValueError("bfs-samples deve ser maior ou igual a 1")
+        raise ValueError("bfs-samples must be at least 1")
     if args.max_vertices < 0:
-        raise ValueError("max-vertices deve ser maior ou igual a 0")
+        raise ValueError("max-vertices must be at least 0")
     if args.memory_limit_mb < 0:
-        raise ValueError("memory-limit-mb deve ser maior ou igual a 0")
-    if selecao_ja_completa(args.out, args.n):
-        return
+        raise ValueError("memory-limit-mb must be at least 0")
+    if not math.isfinite(args.timeout_s) or args.timeout_s < 0:
+        raise ValueError("timeout-s must be finite and at least 0")
+    if args.input_dir.resolve() == args.out.resolve():
+        raise ValueError("input-dir and out must be different directories")
 
-    banco_path = resolver_caminho_banco(args)
+    database_path = resolve_database_path(args)
     if not args.only_select:
-        arquivos = sorted(args.input_dir.glob("*.col"))
-        if args.ignorar_sem_arestas:
-            invalidos = [
-                caminho for caminho in arquivos
-                if not possui_vertices_e_arestas(caminho)
+        files = sorted(args.input_dir.glob("*.col"))
+        if args.skip_edgeless:
+            invalid = [
+                file_path for file_path in files
+                if not has_vertices_and_edges(file_path)
             ]
-            arquivos = [caminho for caminho in arquivos if caminho not in invalidos]
-            for caminho in invalidos:
-                print(f"IGNORADO [sem arestas]: {caminho}")
-        if not arquivos:
+            files = [file_path for file_path in files if file_path not in invalid]
+            for file_path in invalid:
+                print(f"IGNORED [no edges]: {file_path}")
+        if not files:
             raise FileNotFoundError(
-                f"nenhum arquivo .col encontrado em {args.input_dir}"
+                f"no .col files found in {args.input_dir}"
             )
-        calcular_e_persistir_features(
-            arquivos,
+        compute_and_store_features(
+            files,
             args.bfs_samples,
             args.seed,
-            banco_path,
+            database_path,
             args.max_vertices,
             args.memory_limit_mb,
             args.timeout_s,
         )
-    elif not banco_path.exists():
-        raise FileNotFoundError(f"banco de características não encontrado: {banco_path}")
+    elif not database_path.exists():
+        raise FileNotFoundError(f"feature database not found: {database_path}")
 
-    nomes, matriz, falhas = carregar_features(banco_path)
-    if falhas:
-        print(f"\n{len(falhas)} arquivo(s) pulado(s) ou com falha:")
-        for nome, motivo in falhas:
-            print(f"  {nome}: {motivo}")
-    if not nomes:
-        raise RuntimeError("nenhum grafo foi processado com sucesso")
+    names, matrix, failures = load_features(database_path)
+    # A cleanup may have removed files since their features were cached.
+    available = [
+        index for index, name in enumerate(names)
+        if (args.input_dir / name).is_file()
+        and (not args.skip_edgeless or has_vertices_and_edges(args.input_dir / name))
+        and (args.max_vertices == 0 or matrix[index, 0] <= args.max_vertices)
+    ]
+    names = [names[index] for index in available]
+    matrix = matrix[available]
+    if failures:
+        print(f"\n{len(failures)} file(s) skipped or failed:")
+        for name, reason in failures:
+            print(f"  {name}: {reason}")
+    if not names:
+        raise RuntimeError("no graph was processed successfully")
 
-    n_alvo = args.n
-    if n_alvo > len(nomes):
-        if not args.usar_todos_se_faltar:
+    target_count = args.n
+    if target_count > len(names):
+        if not args.use_all_if_fewer:
             raise ValueError(
-                f"foram solicitados {n_alvo} grafos, mas somente "
-                f"{len(nomes)} foram processados com sucesso"
+                f"requested {target_count} graphs, but only "
+                f"{len(names)} were processed successfully"
             )
         print(
-            f"AVISO: solicitados {n_alvo}, disponíveis {len(nomes)}; "
-            "selecionando todos"
+            f"WARNING: requested {target_count}, available {len(names)}; "
+            "selecting all"
         )
-        n_alvo = len(nomes)
+        target_count = len(names)
 
-    if selecao_ja_completa(args.out, n_alvo):
-        return
+    standardized_matrix = StandardScaler().fit_transform(matrix)
+    kmeans = KMeans(n_clusters=target_count, random_state=args.seed, n_init=10)
+    clusters = kmeans.fit_predict(standardized_matrix)
 
-    matriz_padronizada = StandardScaler().fit_transform(matriz)
-    kmeans = KMeans(n_clusters=n_alvo, random_state=args.seed, n_init=10)
-    clusters = kmeans.fit_predict(matriz_padronizada)
-
-    selecionados: list[int] = []
-    for cluster in range(n_alvo):
+    selected: list[int] = []
+    for cluster in range(target_count):
         indices = np.where(clusters == cluster)[0]
         if not len(indices):
             continue
-        pontos = matriz_padronizada[indices]
-        distancias = np.linalg.norm(pontos - kmeans.cluster_centers_[cluster], axis=1)
-        selecionados.append(int(indices[np.argmin(distancias)]))
+        points = standardized_matrix[indices]
+        distances = np.linalg.norm(points - kmeans.cluster_centers_[cluster], axis=1)
+        selected.append(int(indices[np.argmin(distances)]))
 
-    if len(selecionados) < n_alvo:
-        restantes = [
-            indice for indice in range(len(nomes)) if indice not in selecionados
+    if len(selected) < target_count:
+        remaining = [
+            index for index in range(len(names)) if index not in selected
         ]
-        escolhidos = matriz_padronizada[selecionados]
-        distancias = [
-            np.min(np.linalg.norm(escolhidos - matriz_padronizada[indice], axis=1))
-            for indice in restantes
+        chosen = standardized_matrix[selected]
+        distances = [
+            np.min(np.linalg.norm(chosen - standardized_matrix[index], axis=1))
+            for index in remaining
         ]
-        ordem = np.argsort(distancias)[::-1]
-        selecionados.extend(
-            restantes[indice] for indice in ordem[: n_alvo - len(selecionados)]
+        order = np.argsort(distances)[::-1]
+        selected.extend(
+            remaining[index] for index in order[: target_count - len(selected)]
         )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    nomes_selecionados = {nomes[indice] for indice in selecionados}
-    for existente in args.out.glob("*.col"):
-        if existente.name not in nomes_selecionados:
-            existente.unlink()
+    selected_names = {names[index] for index in selected}
+    for existing in args.out.glob("*.col"):
+        if existing.name not in selected_names:
+            existing.unlink()
 
-    print(f"Selecionados {len(selecionados)} grafos:")
-    for indice in selecionados:
-        nome = nomes[indice]
-        valores = {
-            feature: matriz[indice, coluna]
-            for coluna, feature in enumerate(FEATURES)
+    print(f"Selected {len(selected)} graphs:")
+    for index in selected:
+        name = names[index]
+        values = {
+            feature: matrix[index, column]
+            for column, feature in enumerate(FEATURES)
         }
-        shutil.copy2(args.input_dir / nome, args.out / nome)
+        shutil.copy2(args.input_dir / name, args.out / name)
         print(
-            f"  {nome}: n={int(valores['n_vertices'])}, "
-            f"m={int(valores['n_arestas'])}, "
-            f"densidade={valores['densidade']:.6f}, "
-            f"grau médio={valores['grau_medio']:.6f}"
+            f"  {name}: n={int(values['n_vertices'])}, "
+            f"m={int(values['n_edges'])}, "
+            f"density={values['density']:.6f}, "
+            f"mean degree={values['mean_degree']:.6f}"
         )
 
     if args.csv:
-        salvar_csv(args.csv, nomes, matriz, clusters, selecionados)
-        print(f"Características salvas em {args.csv}")
-    print(f"Grafos copiados para {args.out}")
+        save_csv(args.csv, names, matrix, clusters, selected)
+        print(f"Features saved to {args.csv}")
+    print(f"Graphs copied to {args.out}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Converte listas de arestas SNAP para grafos simples DIMACS .col."""
+"""Convert SNAP edge lists to simple DIMACS .col graphs."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import csv
 import os
 import re
 import sqlite3
-import sys
 import tempfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -32,304 +31,309 @@ AUXILIARY_TERMS = (
 )
 
 
-def classificar_arquivo(path: Path) -> str | None:
-    """Identifica o parser aplicável ou retorna None para arquivo auxiliar."""
-    nome = path.name.lower()
-    if any(parte.startswith(".") for parte in path.parts):
+def classify_file(path: Path) -> str | None:
+    """Identify the appropriate parser or return None for auxiliary files."""
+    name = path.name.lower()
+    if any(part.startswith(".") for part in path.parts):
         return None
-    if nome.startswith((".", "._")) or any(term in nome for term in AUXILIARY_TERMS):
+    if name.startswith((".", "._")) or any(term in name for term in AUXILIARY_TERMS):
         return None
     if path.suffix.lower() in {".json", ".py", ".md"}:
         return None
-    if nome == "wiki-rfa.txt":
+    if name == "wiki-rfa.txt":
         return "wiki_rfa"
-    if re.fullmatch(r"network\d+\.csv", nome):
-        return "matriz_temporal"
-    if nome.endswith("_weighted.csv"):
+    if name == "wikielec.elecbs3.txt":
+        return "wiki_elections"
+    if re.fullmatch(r"network\d+\.csv", name):
+        return "temporal_matrix"
+    if name.endswith("_weighted.csv"):
         return None
-    if nome == "mooc_actions.tsv":
+    if name == "mooc_actions.tsv":
         return "mooc"
     if path.suffix.lower() in {".edge", ".edges", ".edgelist"}:
-        return "espacos"
+        return "whitespace"
     if path.suffix.lower() == ".csv":
-        if "edge" in nome or nome.startswith("soc-sign-bitcoin"):
+        if "edge" in name or name.startswith("soc-sign-bitcoin"):
             return "csv"
         return None
     if path.suffix.lower() == ".tsv":
-        if nome == "links.tsv" or nome.startswith("soc-reddithyperlinks"):
+        if name == "links.tsv" or name.startswith("soc-reddithyperlinks"):
             return "tsv"
         return None
     if path.suffix.lower() == ".txt":
-        return "espacos"
+        return "whitespace"
     return None
 
 
-def ler_espacos(path: Path) -> Iterator[tuple[str, str]]:
-    with path.open("r", encoding="utf-8", errors="replace") as arquivo:
-        for linha in arquivo:
-            texto = linha.strip()
-            if not texto or texto.startswith(("#", "%")):
+def read_whitespace(path: Path) -> Iterator[tuple[str, str]]:
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        for line in file:
+            text = line.strip()
+            if not text or text.startswith(("#", "%")):
                 continue
-            campos = texto.split()
-            if len(campos) >= 2:
-                yield campos[0], campos[1]
+            fields = text.split()
+            if len(fields) >= 2:
+                yield fields[0], fields[1]
 
 
-def ler_delimitado(path: Path, delimitador: str) -> Iterator[tuple[str, str]]:
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as arquivo:
-        linhas = (linha for linha in arquivo if linha.strip() and not linha.startswith("#"))
-        leitor = csv.reader(linhas, delimiter=delimitador)
-        primeira = next(leitor, None)
-        if primeira is None or len(primeira) < 2:
+def read_delimited(path: Path, delimiter: str) -> Iterator[tuple[str, str]]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
+        lines = (line for line in file if line.strip() and not line.startswith("#"))
+        reader = csv.reader(lines, delimiter=delimiter)
+        first = next(reader, None)
+        if first is None or len(first) < 2:
             return
 
-        cabecalho = {campo.strip().lower() for campo in primeira}
-        tem_cabecalho = bool(
-            cabecalho
+        header = {field.strip().lower() for field in first}
+        has_header = bool(
+            header
             & {
                 "source_subreddit", "target_subreddit", "source", "target",
                 "id_1", "id_2", "id1", "id2", "node_1", "node_2",
                 "numeric_id_1", "numeric_id_2",
             }
         )
-        if not tem_cabecalho:
-            yield primeira[0].strip(), primeira[1].strip()
+        if not has_header:
+            yield first[0].strip(), first[1].strip()
 
-        for campos in leitor:
-            if len(campos) >= 2:
-                yield campos[0].strip(), campos[1].strip()
-
-
-def ler_mooc(path: Path) -> Iterator[tuple[str, str]]:
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as arquivo:
-        leitor = csv.DictReader(arquivo, delimiter="\t")
-        for linha in leitor:
-            yield f"usuario:{linha['USERID']}", f"alvo:{linha['TARGETID']}"
+        for fields in reader:
+            if len(fields) >= 2:
+                yield fields[0].strip(), fields[1].strip()
 
 
-def ler_wiki_rfa(path: Path) -> Iterator[tuple[str, str]]:
-    origem: str | None = None
-    with path.open("r", encoding="utf-8", errors="replace") as arquivo:
-        for linha in arquivo:
-            if linha.startswith("SRC:"):
-                origem = linha[4:].strip()
-            elif linha.startswith("TGT:") and origem is not None:
-                yield origem, linha[4:].strip()
-                origem = None
+def read_mooc(path: Path) -> Iterator[tuple[str, str]]:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
+        reader = csv.DictReader(file, delimiter="\t")
+        for line in reader:
+            yield f"user:{line['USERID']}", f"target:{line['TARGETID']}"
 
 
-def ler_matriz_temporal(path: Path) -> Iterator[tuple[str, str]]:
-    """Agrega em um grafo as conexões observadas em qualquer instante."""
-    with path.open("r", encoding="utf-8", errors="replace", newline="") as arquivo:
-        leitor = csv.reader(arquivo)
-        cabecalho = next(leitor, [])
-        colunas: list[tuple[int, str, str]] = []
-        for indice, nome in enumerate(cabecalho):
-            match = re.fullmatch(r"P(\d+)_TO_P(\d+)", nome)
-            if match and match.group(1) != match.group(2):
-                colunas.append((indice, f"P{match.group(1)}", f"P{match.group(2)}"))
-
-        vistas: set[tuple[str, str]] = set()
-        for linha in leitor:
-            for indice, origem, alvo in colunas:
-                if indice < len(linha) and float(linha[indice]) != 0:
-                    aresta = tuple(sorted((origem, alvo)))
-                    if aresta not in vistas:
-                        vistas.add(aresta)
-                        yield aresta
+def read_wiki_rfa(path: Path) -> Iterator[tuple[str, str]]:
+    source: str | None = None
+    with path.open("r", encoding="utf-8", errors="replace") as file:
+        for line in file:
+            if line.startswith("SRC:"):
+                source = line[4:].strip()
+            elif line.startswith("TGT:") and source is not None:
+                yield source, line[4:].strip()
+                source = None
 
 
-def extrair_arestas(path: Path, formato: str) -> Iterable[tuple[str, str]]:
-    if formato == "espacos":
-        return ler_espacos(path)
-    if formato == "csv":
-        return ler_delimitado(path, ",")
-    if formato == "tsv":
-        return ler_delimitado(path, "\t")
-    if formato == "mooc":
-        return ler_mooc(path)
-    if formato == "wiki_rfa":
-        return ler_wiki_rfa(path)
-    if formato == "matriz_temporal":
-        return ler_matriz_temporal(path)
-    raise ValueError(f"formato SNAP desconhecido: {formato}")
+def read_temporal_matrix(path: Path) -> Iterator[tuple[str, str]]:
+    """Aggregate connections observed at any time into one graph."""
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as file:
+        reader = csv.reader(file)
+        header = next(reader, [])
+        columns: list[tuple[int, str, str]] = []
+        vertices: set[str] = set()
+        for index, name in enumerate(header):
+            match = re.fullmatch(r"P(\d+)_TO_P(\d+)", name)
+            if match:
+                source, target = f"P{match.group(1)}", f"P{match.group(2)}"
+                vertices.update((source, target))
+                if source != target:
+                    columns.append((index, source, target))
+
+        # Register all known vertices; conversion removes these marker loops.
+        for vertex in sorted(vertices):
+            yield vertex, vertex
+
+        seen: set[tuple[str, str]] = set()
+        for line in reader:
+            for index, source, target in columns:
+                if index < len(line) and float(line[index]) != 0:
+                    edge = tuple(sorted((source, target)))
+                    if edge not in seen:
+                        seen.add(edge)
+                        yield edge
 
 
-def numero_vertices_declarado(path: Path) -> int | None:
+def read_wiki_elections(path: Path) -> Iterator[tuple[str, str]]:
+    """Read voter-to-candidate edges from SNAP election records."""
+    candidate: str | None = None
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            fields = line.split()
+            if not fields or fields[0].startswith("#"):
+                continue
+            record = fields[0].rstrip(":")
+            if record == "E":
+                candidate = None
+            elif record == "U":
+                candidate = fields[1]
+                yield candidate, candidate
+            elif record == "V":
+                if candidate is None or len(fields) < 3:
+                    raise ValueError("Election vote without a candidate or voter")
+                yield fields[2], candidate
+
+
+def extract_edges(path: Path, file_format: str) -> Iterable[tuple[str, str]]:
+    if file_format == "whitespace":
+        return read_whitespace(path)
+    if file_format == "csv":
+        return read_delimited(path, ",")
+    if file_format == "tsv":
+        return read_delimited(path, "\t")
+    if file_format == "mooc":
+        return read_mooc(path)
+    if file_format == "wiki_rfa":
+        return read_wiki_rfa(path)
+    if file_format == "wiki_elections":
+        return read_wiki_elections(path)
+    if file_format == "temporal_matrix":
+        return read_temporal_matrix(path)
+    raise ValueError(f"Unknown SNAP format: {file_format}")
+
+
+def declared_vertex_count(path: Path) -> int | None:
     if path.suffix.lower() != ".txt":
         return None
     pattern = re.compile(r"#\s*Nodes:\s*(\d+)", re.IGNORECASE)
-    with path.open("r", encoding="utf-8", errors="replace") as arquivo:
+    with path.open("r", encoding="utf-8", errors="replace") as file:
         for _ in range(20):
-            linha = arquivo.readline()
-            if not linha:
+            line = file.readline()
+            if not line:
                 break
-            match = pattern.search(linha)
+            match = pattern.search(line)
             if match:
                 return int(match.group(1))
     return None
 
 
-def converter_arquivo(path: Path, output: Path, formato: str) -> bool:
-    """Converte um arquivo usando SQLite para limitar o uso de memória."""
+def convert_file(
+    path: Path, output: Path, file_format: str, remove_isolated: bool = False
+) -> bool:
+    """Convert a file using SQLite to limit memory usage."""
     output.mkdir(parents=True, exist_ok=True)
-    destino = output / f"{path.stem}.col"
-    banco_path: Path | None = None
+    destination = output / f"{path.stem}.col"
+    database_path: Path | None = None
+    connection: sqlite3.Connection | None = None
 
     try:
         with tempfile.NamedTemporaryFile(
             prefix="snap_", suffix=".sqlite3", dir=output, delete=False
-        ) as banco:
-            banco_path = Path(banco.name)
+        ) as database:
+            database_path = Path(database.name)
 
-        conexao = sqlite3.connect(banco_path)
-        conexao.execute("PRAGMA journal_mode=OFF")
-        conexao.execute("PRAGMA synchronous=OFF")
-        conexao.execute("CREATE TABLE edges (u TEXT, v TEXT, PRIMARY KEY (u, v)) WITHOUT ROWID")
+        connection = sqlite3.connect(database_path)
+        connection.execute("PRAGMA journal_mode=OFF")
+        connection.execute("PRAGMA synchronous=OFF")
+        connection.execute("PRAGMA temp_store=FILE")
+        connection.execute("PRAGMA cache_size=-16384")
+        connection.execute("CREATE TABLE edges (u TEXT, v TEXT, PRIMARY KEY (u, v)) WITHOUT ROWID")
 
-        lote: list[tuple[str, str]] = []
-        for origem, alvo in extrair_arestas(path, formato):
-            if not origem or not alvo or origem == alvo:
+        batch: list[tuple[str, str]] = []
+        for source, target in extract_edges(path, file_format):
+            if not source or not target:
                 continue
-            u, v = sorted((origem, alvo))
-            lote.append((u, v))
-            if len(lote) == 50_000:
-                conexao.executemany("INSERT OR IGNORE INTO edges VALUES (?, ?)", lote)
-                lote.clear()
-        if lote:
-            conexao.executemany("INSERT OR IGNORE INTO edges VALUES (?, ?)", lote)
-        conexao.commit()
+            u, v = sorted((source, target))
+            batch.append((u, v))
+            if len(batch) == 50_000:
+                connection.executemany("INSERT OR IGNORE INTO edges VALUES (?, ?)", batch)
+                batch.clear()
+        if batch:
+            connection.executemany("INSERT OR IGNORE INTO edges VALUES (?, ?)", batch)
+        connection.commit()
 
-        conexao.execute(
-            "CREATE TABLE nodes (id INTEGER PRIMARY KEY AUTOINCREMENT, original TEXT UNIQUE)"
+        connection.execute(
+            "CREATE TABLE nodes (id INTEGER PRIMARY KEY, original TEXT UNIQUE)"
         )
-        conexao.execute("INSERT OR IGNORE INTO nodes(original) SELECT u FROM edges")
-        conexao.execute("INSERT OR IGNORE INTO nodes(original) SELECT v FROM edges")
-        vertices_observados = conexao.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        vertices_declarados = numero_vertices_declarado(path)
-        total_vertices = max(vertices_observados, vertices_declarados or 0)
-        total_arestas = conexao.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        # UNION inserts each vertex once, producing contiguous IDs 1..n.
+        # Register endpoints before removing loops so loop-only vertices survive.
+        connection.execute(
+            "INSERT INTO nodes(original) SELECT u FROM edges UNION SELECT v FROM edges"
+        )
+        connection.execute("DELETE FROM edges WHERE u = v")
+        observed_vertices = connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        declared_vertices = declared_vertex_count(path)
+        total_vertices = max(observed_vertices, declared_vertices or 0)
+        total_edges = connection.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        if remove_isolated:
+            active_vertices = connection.execute(
+                "SELECT COUNT(*) FROM (SELECT u FROM edges UNION SELECT v FROM edges)"
+            ).fetchone()[0]
+            isolated_vertices = total_vertices - active_vertices
+            if isolated_vertices:
+                destination.unlink(missing_ok=True)
+                print(
+                    f"REMOVED/SKIPPED: {path.name}: {isolated_vertices} isolated vertices"
+                )
+                return False
 
-        if total_vertices == 0 or total_arestas == 0:
-            conexao.close()
-            destino.unlink(missing_ok=True)
-            print(
-                f"PULADO: {path.name}: grafo vazio ou somente com "
-                "vértices isolados"
-            )
-            return False
-
-        with destino.open("w", encoding="utf-8", newline="\n") as arquivo:
-            arquivo.write(f"c Convertido de {path.name}; direção, pesos e tempo ignorados\n")
-            arquivo.write(f"p edge {total_vertices} {total_arestas}\n")
-            consulta = """
+        with destination.open("w", encoding="utf-8", newline="\n") as file:
+            file.write(f"c Converted from {path.name}; direction, weights, and time ignored\n")
+            file.write(f"p edge {total_vertices} {total_edges}\n")
+            query = """
                 SELECT nu.id, nv.id
                 FROM edges e
                 JOIN nodes nu ON nu.original = e.u
                 JOIN nodes nv ON nv.original = e.v
                 ORDER BY nu.id, nv.id
             """
-            for u, v in conexao.execute(consulta):
-                arquivo.write(f"e {u} {v}\n")
+            for u, v in connection.execute(query):
+                file.write(f"e {u} {v}\n")
 
-        conexao.close()
-        print(f"OK: {path.name} -> {total_vertices} vértices, {total_arestas} arestas")
+        print(f"OK: {path.name} -> {total_vertices} vertices, {total_edges} edges")
         return True
     except Exception as error:
-        destino.unlink(missing_ok=True)
-        print(f"FALHOU: {path}: {error}")
+        destination.unlink(missing_ok=True)
+        print(f"FAILED: {path}: {error}")
         return False
     finally:
-        if banco_path is not None:
-            banco_path.unlink(missing_ok=True)
-
-
-def verificar_e_remover_grafos_invalidos(output: Path) -> int:
-    """Remove .col sem vértices, sem arestas ou apenas com vértices isolados."""
-    removidos = 0
-    if not output.exists():
-        return removidos
-
-    print("Verificando os grafos convertidos...")
-    for caminho in sorted(output.glob("*.col")):
-        vertices: int | None = None
-        arestas_declaradas: int | None = None
-        encontrou_aresta = False
-
-        try:
-            with caminho.open("r", encoding="utf-8", errors="replace") as arquivo:
-                for linha in arquivo:
-                    if linha.startswith("p "):
-                        partes = linha.split()
-                        if len(partes) >= 4:
-                            vertices = int(partes[2])
-                            arestas_declaradas = int(partes[3])
-                    elif linha.startswith("e "):
-                        encontrou_aresta = True
-
-                    if (
-                        vertices is not None
-                        and arestas_declaradas is not None
-                        and encontrou_aresta
-                    ):
-                        break
-        except (OSError, ValueError):
-            vertices = None
-            arestas_declaradas = None
-
-        valido = (
-            vertices is not None
-            and vertices > 0
-            and arestas_declaradas is not None
-            and arestas_declaradas > 0
-            and encontrou_aresta
-        )
-        if not valido:
-            caminho.unlink(missing_ok=True)
-            removidos += 1
-            print(f"REMOVIDO [grafo inválido]: {caminho}")
-
-    print(f"Verificação concluída: {removidos} grafo(s) inválido(s) removido(s).")
-    return removidos
+        if connection is not None:
+            connection.close()
+        if database_path is not None:
+            database_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
     project_root = os.environ.get("PROJECT_ROOT")
     if not project_root:
-        raise RuntimeError("PROJECT_ROOT não está definida.")
-    raiz = Path(project_root) / "datasets" / "snap"
+        raise RuntimeError("PROJECT_ROOT is not set.")
+    root = Path(project_root) / "datasets" / "snap"
 
-    parser = argparse.ArgumentParser(description="Converte grafos SNAP para DIMACS .col")
-    parser.add_argument("--input", type=Path, default=raiz / "raw", help="Pasta SNAP de entrada")
-    parser.add_argument("--output", type=Path, default=raiz / "processed", help="Pasta DIMACS de saída")
-    parser.add_argument("--analisar", action="store_true", help="Apenas classifica os arquivos")
+    parser = argparse.ArgumentParser(description="Convert SNAP graphs to DIMACS .col")
+    parser.add_argument("--input", type=Path, default=root / "raw", help="SNAP input directory")
+    parser.add_argument("--output", type=Path, default=root / "processed", help="DIMACS output directory")
+    parser.add_argument("--analyze", action="store_true", help="Only classify files")
+    parser.add_argument(
+        "--remove-isolated", action="store_true",
+        help="Discard the entire output graph if any vertex has no non-loop edge",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    arquivos = sorted(path for path in args.input.rglob("*") if path.is_file())
-    selecionados = [(path, formato) for path in arquivos if (formato := classificar_arquivo(path))]
-    ignorados = len(arquivos) - len(selecionados)
-    print(f"Encontrados: {len(selecionados)} grafos; {ignorados} arquivos auxiliares ignorados")
+    files = sorted(path for path in args.input.rglob("*") if path.is_file())
+    selected = [(path, file_format) for path in files if (file_format := classify_file(path))]
+    ignored = len(files) - len(selected)
+    print(f"Found: {len(selected)} graphs; {ignored} auxiliary files ignored")
 
-    selecionados_paths = {path for path, _ in selecionados}
-    for path, formato in selecionados:
-        print(f"MANTER [{formato}]: {path}")
-    for path in arquivos:
-        if path not in selecionados_paths:
-            print(f"IGNORAR [auxiliar]: {path}")
+    selected_paths = {path for path, _ in selected}
+    for path, file_format in selected:
+        print(f"KEEP [{file_format}]: {path}")
+    for path in files:
+        if path not in selected_paths:
+            print(f"IGNORE [auxiliary]: {path}")
 
-    if args.analisar:
-        print("Análise concluída; nenhum arquivo foi convertido.")
+    if args.analyze:
+        print("Analysis complete; no files were converted.")
         return
 
-    convertidos = sum(
-        converter_arquivo(path, args.output, formato)
-        for path, formato in selecionados
+    output_names: set[str] = set()
+    for path, _ in selected:
+        name = f"{path.stem}.col"
+        if name in output_names:
+            raise ValueError(f"Multiple input files would overwrite {name}")
+        output_names.add(name)
+
+    converted = sum(
+        convert_file(path, args.output, file_format, args.remove_isolated)
+        for path, file_format in selected
     )
-    verificar_e_remover_grafos_invalidos(args.output)
-    print(f"Concluído: {convertidos} de {len(selecionados)} grafos convertidos")
+    print(f"Completed: {converted} of {len(selected)} graphs converted")
 
 
 if __name__ == "__main__":
