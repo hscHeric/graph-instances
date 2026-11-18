@@ -14,7 +14,8 @@ Notes:
     * With ``--remove-isolated``, graphs containing any degree-0 vertex are
       discarded (and any pre-existing matching file is unlinked) without being
       replaced, while ``--seed`` still advances by 1.
-    * ``nx.erdos_renyi_graph`` evaluates all O(n^2) pairs in memory.
+    * Uses ``nx.fast_gnp_random_graph`` (Batagelj-Brandes ``O(n + m)``) when
+      ``p < 0.25`` and ``nx.erdos_renyi_graph`` (``O(n^2)``) for denser graphs.
 """
 
 from __future__ import annotations
@@ -232,7 +233,10 @@ def main() -> None:
         for tag, probability, density_comment, target_degree in densities:
             for repetition in range(args.reps):
                 attempted += 1
-                graph = nx.erdos_renyi_graph(n, probability, seed=seed)
+                if probability < 0.25:
+                    graph = nx.fast_gnp_random_graph(n, probability, seed=seed)
+                else:
+                    graph = nx.erdos_renyi_graph(n, probability, seed=seed)
                 name = f"er_n{n}_{tag}_{repetition}.col"
                 file_path = output_directory / name
                 if args.remove_isolated and any(degree == 0 for _, degree in graph.degree()):
