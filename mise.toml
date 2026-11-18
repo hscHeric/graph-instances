@@ -1,9 +1,9 @@
 [tools]
-python = "latest"
+python = "3.14"
 
 [env]
-_.python.venv = { path = ".venv", create = true }
-PROJECT_ROOT = "{{cwd}}"
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--seed"] }
+PROJECT_ROOT = "{{config_root}}"
 
 [tasks.download]
 description = "Download a dataset: mise run download -- snap"

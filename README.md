@@ -34,8 +34,9 @@ on Windows, use WSL for that workflow.
 
 ### Python only
 
-You need Python with `pip` and `venv` available. Create a local environment
-and install the dependencies:
+You need Python 3.14 (recommended so `numpy`, `scipy`, and `scikit-learn` install
+from prebuilt binary wheels) with `pip` and `venv` available. Create a local
+environment and install the dependencies:
 
 ```bash
 python3 -m venv .venv
@@ -50,9 +51,12 @@ you do not need to install mise or export `PROJECT_ROOT`.
 
 ### With mise
 
-If you already use mise:
+If you already use mise, `mise.toml` pins Python `3.14`, automatically creates
+and activates a local `.venv` in this directory (seeding `pip` even when `uv`
+is installed), and sets `PROJECT_ROOT` to `{{config_root}}`:
 
 ```bash
+mise trust
 mise install
 mise exec -- python -m pip install -r requirements.txt
 ```
@@ -109,7 +113,8 @@ python graph_instances.py generate all --vertices 100 200 --count 3 --remove-iso
 
 With `all`, use options shared by every model. Model-specific settings such as
 `--m` belong in a command for that model. Omitting `--vertices` uses the larger
-preset size progression; see the [parameter reference](docs/reference.md#generator-parameters).
+preset size progression (`--doubling 200 1.15 30`); run
+`python graph_instances.py generate <model> --help` for full generator options.
 
 ## Use an existing dataset
 
@@ -141,10 +146,11 @@ removes loops and repeated undirected edges, and renumbers vertices to `1..n`.
 Conversion leaves the original files unchanged. Read the final converted
 count: unsupported files and conversion failures may be skipped.
 
-SNAP excludes Friendster by default. Large collections can require substantial
-download time and disk space. [Advanced download options](docs/reference.md#download-parameters)
-cover concurrency and [the SNAP reference](docs/reference.md#snap) explains
-how to include Friendster or preview file classification.
+SNAP excludes Friendster by default (pass `--include-friendster` to include it,
+or `--analyze` to `convert snap` to preview file classification). Large
+collections can require substantial download time and disk space; control
+download concurrency with `*_DOWNLOAD_WORKERS` environment variables documented
+in each script under `scripts/download/`.
 
 ## Remove graphs with isolated vertices
 
@@ -179,8 +185,8 @@ edge set into memory. Malformed files are reported and left untouched.
 This filter does not repair files or check for duplicate edges.
 
 Filtering during generation/conversion only handles the outputs of that run.
-Use `filter` to inspect older files too. See [filtering details](docs/reference.md#excluding-graphs-with-isolated-vertices)
-for custom directories and source-data limitations.
+Use `filter` to inspect older files too, or run
+`python graph_instances.py filter all --help` for direct path options.
 
 ## Choose a smaller collection
 
@@ -208,9 +214,9 @@ compact NumPy/SciPy CSR arrays, computes exact clustering/transitivity up to
 applies `log1p` scaling to heavy-tailed size/degree features before clustering,
 and by default skips graphs above 5,000,000 vertices. For SNAP, it also caps
 repetitive temporal snapshot series (`--max-per-series 2`). Its defaults limit
-each worker to 4,096 MB and six hours. See
-[selection options](docs/reference.md#representative-selection) before changing
-these limits for extreme graphs such as Friendster.
+each worker to 4,096 MB and six hours. Run
+`python graph_instances.py select snap --help` to inspect options before
+changing these limits for extreme graphs such as Friendster.
 
 ## Use mise shortcuts
 
@@ -290,8 +296,8 @@ python graph_instances.py select snap --help
 | No processed directory or no `.col` files | Generate graphs first, or run both download and conversion. Check the reported output counts. |
 | Fewer graphs than requested | Check for isolated-vertex exclusions, conversion errors, or selection resource limits. |
 | An existing SNAP file has an ID outside `1..n` | Regenerate old conversions; an earlier converter could write invalid vertex IDs. |
-| Selection is slow | Use fewer/smaller inputs or inspect the selection limits in the reference. Filtering alone does not calculate structural features. |
+| Selection is slow | Use fewer/smaller inputs or inspect `--exact-triangle-edges`, `--triangle-samples`, and `--max-vertices` via `select <dataset> --help`. Filtering alone does not calculate structural features. |
 
-For complete options and older command aliases, see the
-[command reference](docs/reference.md). For known limitations and the scope
-of the code review, see the [correctness review](docs/correctness-review.md).
+Detailed per-script behavior, environment variables, and invariants are
+documented directly in the docstrings of `graph_instances.py` and the scripts
+under `scripts/`.
