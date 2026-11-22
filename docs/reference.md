@@ -134,7 +134,7 @@ provenance and cluster centroids in `datasets/<dataset>/metadata.json`.
 | `--input-dir DIR` | Required | Directory of top-level `*.col` files (must differ from `--out`). |
 | `--count`, `--n K` | Required | Target subset size (presets: HB 50, DIMACS 80, BHOSLIB 30, SNAP 20, synthetic 30). |
 | `--out DIR` | Required | Destination directory for selected `.col` files. |
-| `--seed SEED` | `42` | Seed for K-Means, BFS sampling, and triangle sampling. |
+| `--seed SEED` | Random | Seed for K-Means, BFS sampling, and triangle sampling (recorded with `seed_source` in `metadata.json`). |
 | `--bfs-samples S` | `10` | BFS source vertices sampled from the largest component. |
 | `--exact-triangle-edges M` | `200000` | Exact Chiba-Nishizeki clustering/transitivity up to `M` edges; unbiased wedge/pair sampling above (`0` = always exact). |
 | `--triangle-samples N` | `10000` | Monte Carlo samples for clustering and transitivity when `m > M`. |

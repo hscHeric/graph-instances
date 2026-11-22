@@ -51,6 +51,7 @@ import os
 import random
 import re
 import resource
+import secrets
 import shutil
 import sqlite3
 import sys
@@ -695,7 +696,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--n", "--count", type=int, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for BFS, triangle sampling, and K-Means (default: random)",
+    )
     parser.add_argument("--bfs-samples", type=int, default=10)
     parser.add_argument(
         "--exact-triangle-edges",
@@ -1596,6 +1602,13 @@ def main() -> None:
     if args.input_dir.resolve() == args.out.resolve():
         raise ValueError("input-dir and out must be different directories")
 
+    if args.seed is None:
+        args.seed = secrets.randbelow(2**31)
+        seed_source = "random"
+        print(f"Using random selection seed: {args.seed}")
+    else:
+        seed_source = "cli"
+
     database_path = resolve_database_path(args)
     if not args.only_select:
         files = sorted(args.input_dir.glob("*.col"))
@@ -1828,6 +1841,7 @@ def main() -> None:
                 "requested_count": args.n,
                 "selected_count": len(selected),
                 "seed": args.seed,
+                "seed_source": seed_source,
                 "bfs_samples": args.bfs_samples,
                 "exact_triangle_edges": args.exact_triangle_edges,
                 "triangle_samples": args.triangle_samples,
