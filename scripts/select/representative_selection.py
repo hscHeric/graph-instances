@@ -764,6 +764,12 @@ def parse_args() -> argparse.Namespace:
         help="Use stored database features without processing new graphs",
     )
     parser.add_argument(
+        "--include-files",
+        nargs="+",
+        metavar="FILENAME",
+        help="Restrict selection to these .col filenames from --input-dir",
+    )
+    parser.add_argument(
         "--no-log-scale",
         action="store_true",
         help=(
@@ -1610,8 +1616,22 @@ def main() -> None:
         seed_source = "cli"
 
     database_path = resolve_database_path(args)
+    include_file_names = set(args.include_files) if args.include_files else None
+    if include_file_names is not None:
+        invalid_names = sorted(
+            name for name in include_file_names
+            if Path(name).name != name or not (args.input_dir / name).is_file()
+        )
+        if invalid_names:
+            raise ValueError(
+                "--include-files contains names that are not files in --input-dir: "
+                + ", ".join(invalid_names[:10])
+            )
     if not args.only_select:
-        files = sorted(args.input_dir.glob("*.col"))
+        files = sorted(
+            path for path in args.input_dir.glob("*.col")
+            if include_file_names is None or path.name in include_file_names
+        )
         if args.skip_edgeless:
             invalid = [
                 file_path
@@ -1646,6 +1666,7 @@ def main() -> None:
         index
         for index, name in enumerate(names)
         if (args.input_dir / name).is_file()
+        and (include_file_names is None or name in include_file_names)
         and (not args.skip_edgeless or has_vertices_and_edges(args.input_dir / name))
         and (args.max_vertices == 0 or matrix[index, 0] <= args.max_vertices)
     ]
@@ -1672,6 +1693,12 @@ def main() -> None:
                 f"After temporal series cap (--max-per-series {args.max_per_series}): "
                 f"{len(names)} of {eligible_before_series_cap} graphs enter global clustering"
             )
+
+    if include_file_names is not None and len(names) < args.n:
+        raise ValueError(
+            f"--include-files leaves {len(names)} graphs after selection filters, "
+            f"but {args.n} representatives are required"
+        )
 
     target_count = args.n
     if target_count > len(names):
@@ -1837,6 +1864,11 @@ def main() -> None:
             "output_dir": str(args.out),
             "database_path": str(database_path),
             "csv_path": str(csv_path),
+            "input_filter": {
+                "include_files_enabled": include_file_names is not None,
+                "included_file_count": len(include_file_names) if include_file_names is not None else None,
+                "included_files": sorted(include_file_names) if include_file_names is not None else None,
+            },
             "parameters": {
                 "requested_count": args.n,
                 "selected_count": len(selected),
