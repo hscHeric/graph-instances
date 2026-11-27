@@ -252,6 +252,27 @@ def read_dimacs_header(file_path: Path) -> tuple[int, int] | None:
     return None
 
 
+def estimate_brkga_working_set_bytes(
+    n_vertices: int,
+    n_edges: int,
+    population_size: int,
+    independent_populations: int,
+    threads: int,
+) -> int:
+    """Estimate graph, chromosome, and decoder storage with a 25% margin.
+
+    This is an eligibility model for dataset selection, not measured RSS.
+    It counts CSR storage, previous/current chromosomes, per-thread offspring
+    buffers, and the decoder's label/count arrays.
+    """
+    graph_bytes = 4 * (n_vertices + 1) + 8 * n_edges
+    chromosome_bytes = 8 * n_vertices * (
+        2 * independent_populations * population_size + threads
+    )
+    decoder_bytes = 10 * n_vertices * threads
+    return math.ceil((graph_bytes + chromosome_bytes + decoder_bytes) * 1.25)
+
+
 def read_dimacs_col(file_path: Path) -> CSRGraph:
     """Strictly parse a simple undirected DIMACS ``.col`` file into CSR format.
 
@@ -737,6 +758,30 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4096,
         help="Memory limit per subprocess in MB; default: 4096",
+    )
+    parser.add_argument(
+        "--solver-memory-budget-mb",
+        type=int,
+        default=0,
+        help="Optional BRKGA dataset-eligibility budget in MB; requires --max-population-size",
+    )
+    parser.add_argument(
+        "--max-population-size",
+        type=int,
+        default=0,
+        help="Largest population_size allowed by the planned tuning space; 0 disables BRKGA filtering",
+    )
+    parser.add_argument(
+        "--num-independent-populations",
+        type=int,
+        default=3,
+        help="BRKGA independent populations used by the eligibility estimate (default: 3)",
+    )
+    parser.add_argument(
+        "--solver-threads",
+        type=int,
+        default=4,
+        help="BRKGA worker threads used by the eligibility estimate (default: 4)",
     )
     parser.add_argument(
         "--timeout-s",
@@ -1595,6 +1640,15 @@ def main() -> None:
         raise ValueError("max-vertices must be at least 0")
     if args.memory_limit_mb < 0:
         raise ValueError("memory-limit-mb must be at least 0")
+    memory_filter_enabled = args.solver_memory_budget_mb > 0 or args.max_population_size > 0
+    if args.solver_memory_budget_mb < 0 or args.max_population_size < 0:
+        raise ValueError("solver-memory-budget-mb and max-population-size must be at least 0")
+    if memory_filter_enabled and (args.solver_memory_budget_mb == 0 or args.max_population_size == 0):
+        raise ValueError(
+            "solver-memory-budget-mb and max-population-size must be set together"
+        )
+    if args.num_independent_populations < 1 or args.solver_threads < 1:
+        raise ValueError("num-independent-populations and solver-threads must be at least 1")
     if not math.isfinite(args.timeout_s) or args.timeout_s < 0:
         raise ValueError("timeout-s must be finite and at least 0")
     if args.max_per_series < 0:
@@ -1610,8 +1664,66 @@ def main() -> None:
         seed_source = "cli"
 
     database_path = resolve_database_path(args)
+    memory_exclusions: list[dict[str, object]] = []
+    eligible_file_names: set[str] | None = None
+    memory_filter_summary: dict[str, object] = {
+        "enabled": memory_filter_enabled,
+        "model": "csr+two_chromosome_generations+thread_buffers+decoder,25pct_margin",
+        "solver_memory_budget_mb": args.solver_memory_budget_mb,
+        "max_population_size": args.max_population_size,
+        "num_independent_populations": args.num_independent_populations,
+        "solver_threads": args.solver_threads,
+        "candidate_count": 0,
+        "eligible_count": 0,
+        "excluded": memory_exclusions,
+    }
+    if memory_filter_enabled:
+        candidates = sorted(args.input_dir.glob("*.col"))
+        eligible_file_names = set()
+        memory_filter_summary["candidate_count"] = len(candidates)
+        for file_path in candidates:
+            header = read_dimacs_header(file_path)
+            if header is None:
+                # Keep malformed files in the feature stage so its established
+                # parser records the failure instead of hiding it as a memory skip.
+                eligible_file_names.add(file_path.name)
+                continue
+            n_vertices, n_edges = header
+            estimate_bytes = estimate_brkga_working_set_bytes(
+                n_vertices,
+                n_edges,
+                args.max_population_size,
+                args.num_independent_populations,
+                args.solver_threads,
+            )
+            estimate_mb = estimate_bytes / (1024 * 1024)
+            if estimate_mb > args.solver_memory_budget_mb:
+                memory_exclusions.append(
+                    {
+                        "file": file_path.name,
+                        "n_vertices": n_vertices,
+                        "n_edges": n_edges,
+                        "estimated_working_set_mb": round(estimate_mb, 3),
+                        "reason": "exceeds_predeclared_solver_budget",
+                    }
+                )
+                print(
+                    f"INELIGIBLE [solver budget]: {file_path.name} "
+                    f"estimate={estimate_mb:.1f} MiB > "
+                    f"budget={args.solver_memory_budget_mb} MiB"
+                )
+            else:
+                eligible_file_names.add(file_path.name)
+        memory_filter_summary["eligible_count"] = len(eligible_file_names)
+        if not eligible_file_names:
+            raise ValueError("no graph satisfies the declared BRKGA solver memory budget")
+
     if not args.only_select:
-        files = sorted(args.input_dir.glob("*.col"))
+        files = sorted(
+            path
+            for path in args.input_dir.glob("*.col")
+            if eligible_file_names is None or path.name in eligible_file_names
+        )
         if args.skip_edgeless:
             invalid = [
                 file_path
@@ -1646,6 +1758,7 @@ def main() -> None:
         index
         for index, name in enumerate(names)
         if (args.input_dir / name).is_file()
+        and (eligible_file_names is None or name in eligible_file_names)
         and (not args.skip_edgeless or has_vertices_and_edges(args.input_dir / name))
         and (args.max_vertices == 0 or matrix[index, 0] <= args.max_vertices)
     ]
@@ -1672,6 +1785,13 @@ def main() -> None:
                 f"After temporal series cap (--max-per-series {args.max_per_series}): "
                 f"{len(names)} of {eligible_before_series_cap} graphs enter global clustering"
             )
+
+    if memory_filter_enabled and len(names) < args.n:
+        raise ValueError(
+            f"solver budget leaves only {len(names)} eligible graphs after all "
+            f"selection filters, but {args.n} representatives are required; "
+            "no smaller cohort will be selected"
+        )
 
     target_count = args.n
     if target_count > len(names):
@@ -1837,6 +1957,7 @@ def main() -> None:
             "output_dir": str(args.out),
             "database_path": str(database_path),
             "csv_path": str(csv_path),
+            "solver_memory_filter": memory_filter_summary,
             "parameters": {
                 "requested_count": args.n,
                 "selected_count": len(selected),
@@ -1847,6 +1968,10 @@ def main() -> None:
                 "triangle_samples": args.triangle_samples,
                 "max_vertices": args.max_vertices,
                 "memory_limit_mb": args.memory_limit_mb,
+                "solver_memory_budget_mb": args.solver_memory_budget_mb,
+                "max_population_size": args.max_population_size,
+                "num_independent_populations": args.num_independent_populations,
+                "solver_threads": args.solver_threads,
                 "timeout_s": args.timeout_s,
                 "skip_edgeless": args.skip_edgeless,
                 "use_all_if_fewer": args.use_all_if_fewer,
@@ -1861,6 +1986,8 @@ def main() -> None:
             },
             "summary": {
                 "eligible_before_series_cap": eligible_before_series_cap,
+                "eligible_by_solver_memory_model": memory_filter_summary["eligible_count"],
+                "excluded_by_solver_memory_model": len(memory_exclusions),
                 "clustered_pool": len(names),
                 "selected_count": len(selected),
                 "failed_or_skipped_count": len(failures),
